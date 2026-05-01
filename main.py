@@ -25,6 +25,18 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 SAVED_PDF      = OUTPUT_DIR / "saved_textbook.pdf"
 SAVED_PDF_NAME = OUTPUT_DIR / "saved_textbook_name.txt"
 
+BUNDLED_PDF      = (Path(__file__).parent / "../../Reference and Solution Manual/Modern Control Systems-12 Edition.pdf").resolve()
+BUNDLED_PDF_NAME = "Modern Control Systems-12 Edition.pdf"
+
+
+def _active_pdf() -> Optional[Path]:
+    """Return the PDF to use: user-uploaded first, then the bundled textbook."""
+    if SAVED_PDF.exists():
+        return SAVED_PDF
+    if BUNDLED_PDF.exists():
+        return BUNDLED_PDF
+    return None
+
 GEMINI_PROMPT = """\
 You are extracting end-of-chapter problems from a Control Systems textbook (Modern Control Systems, 12th edition).
 
@@ -84,8 +96,15 @@ _HTML = """<!DOCTYPE html>
     /* Spinner (inline) */
     .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.4); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    /* PDF saved indicator */
-    .pdf-saved-pill { display: none; align-items: center; gap: 8px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 5px 10px; font-size: 0.78rem; color: #166534; }
+    /* PDF picker */
+    .pdf-picker-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px; background: #f8fafc; border: 1.5px dashed #cbd5e1; border-radius: 6px; font-size: 0.78rem; font-weight: 600; color: #475569; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; user-select: none; }
+    .pdf-picker-btn:hover { border-color: #2563eb; color: #2563eb; background: #eff6ff; }
+    .pdf-ready-pill { display: none; align-items: center; gap: 7px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 5px 11px; font-size: 0.78rem; color: #166534; max-width: 340px; }
+    .pdf-ready-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+    .pdf-pending-pill { display: none; align-items: center; gap: 7px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 5px 11px; font-size: 0.78rem; color: #92400e; max-width: 380px; }
+    .pdf-pending-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+    .pdf-change-link { font-size: 0.7rem; color: #64748b; text-decoration: underline; cursor: pointer; flex-shrink: 0; }
+    .pdf-change-link:hover { color: #2563eb; }
     /* Workflow grid */
     .workflow-grid { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
     .workflow-grid .card { flex: 1; min-width: 260px; margin-bottom: 0; }
@@ -160,17 +179,23 @@ _HTML = """<!DOCTYPE html>
   <!-- ── Config bar ── -->
   <div class="card" style="margin-bottom:16px;">
     <div class="config-bar">
-      <!-- PDF -->
-      <div id="pdf-saved-row" class="pdf-saved-pill">
-        <span>&#10003;</span>
-        <span id="pdf-saved-name"></span>
-        <button class="btn btn-secondary btn-xs" onclick="changePdf()">Change</button>
+      <!-- PDF picker -->
+      <input type="file" id="pdf-file-input" accept=".pdf" style="display:none;" onchange="handlePdfSelect(this)">
+      <label id="pdf-picker-btn" class="pdf-picker-btn" for="pdf-file-input">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Choose PDF
+      </label>
+      <div id="pdf-ready-pill" class="pdf-ready-pill">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        <span id="pdf-ready-name" class="pdf-ready-name"></span>
+        <span class="pdf-change-link" onclick="document.getElementById('pdf-file-input').click()">Change</span>
       </div>
-      <div id="pdf-picker-row" style="display:flex;align-items:center;gap:8px;">
-        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('tb-file').click()">Choose PDF</button>
-        <span id="tb-name" style="font-size:0.78rem;color:#64748b;">No file chosen</span>
+      <div id="pdf-pending-pill" class="pdf-pending-pill">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span id="pdf-pending-name" class="pdf-pending-name"></span>
+        <span style="color:#a16207;font-size:0.68rem;flex-shrink:0;">uploads on Extract</span>
+        <span class="pdf-change-link" onclick="document.getElementById('pdf-file-input').click()">Change</span>
       </div>
-      <input id="tb-file" type="file" accept=".pdf" style="display:none" onchange="onFileChosen(this)">
       <!-- Divider -->
       <span class="config-sep">|</span>
       <!-- Pages -->
@@ -250,11 +275,43 @@ _HTML = """<!DOCTYPE html>
 
 <script>
   var PROMPT = __PROMPT__;
-  var katexReady   = false;
-  var problems     = [];
-  var rawText      = '';
-  var activeFilter = 'all';
+  var katexReady    = false;
+  var problems      = [];
+  var rawText       = '';
+  var activeFilter  = 'all';
   var activeCardIdx = null;
+  var pendingPdfFile = null;
+
+  // ── PDF state ─────────────────────────────────────────────────────────────
+
+  function initPdfState() {
+    fetch('/api/pdf-info').then(function(r) { return r.json(); }).then(function(d) {
+      if (d.saved && d.name) { showPdfReady(d.name); }
+    }).catch(function() {});
+  }
+
+  function handlePdfSelect(input) {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    pendingPdfFile = file;
+    document.getElementById('pdf-picker-btn').style.display = 'none';
+    document.getElementById('pdf-ready-pill').style.display  = 'none';
+    var pill = document.getElementById('pdf-pending-pill');
+    pill.style.display = 'inline-flex';
+    document.getElementById('pdf-pending-name').textContent = file.name;
+    input.value = '';
+  }
+
+  function showPdfReady(name) {
+    pendingPdfFile = null;
+    document.getElementById('pdf-picker-btn').style.display  = 'none';
+    document.getElementById('pdf-pending-pill').style.display = 'none';
+    var pill = document.getElementById('pdf-ready-pill');
+    pill.style.display = 'inline-flex';
+    document.getElementById('pdf-ready-name').textContent = name;
+  }
+
+  window.addEventListener('DOMContentLoaded', initPdfState);
 
   var KATEX_OPTS = {
     delimiters: [
@@ -279,43 +336,15 @@ _HTML = """<!DOCTYPE html>
     }
   }
 
-  // ── PDF persistence ───────────────────────────────────────────────────────
-
-  (async function checkSavedPdf() {
-    try {
-      var info = await (await fetch('/api/pdf-info')).json();
-      if (info.saved) {
-        document.getElementById('pdf-saved-name').textContent = info.name;
-        document.getElementById('pdf-saved-row').style.display  = 'flex';
-        document.getElementById('pdf-picker-row').style.display = 'none';
-      }
-    } catch(e) {}
-  })();
-
-  function onFileChosen(input) {
-    document.getElementById('tb-name').textContent = input.files[0] ? input.files[0].name : 'No file chosen';
-  }
-
-  function changePdf() {
-    document.getElementById('pdf-saved-row').style.display  = 'none';
-    document.getElementById('pdf-picker-row').style.display = 'flex';
-    document.getElementById('tb-file').value = '';
-    document.getElementById('tb-name').textContent = 'No file chosen';
-    document.getElementById('tb-file').click();
-  }
-
   // ── Extract ───────────────────────────────────────────────────────────────
 
   async function startExtract() {
     hideError();
-    var tbFile   = document.getElementById('tb-file').files[0] || null;
-    var hasSaved = document.getElementById('pdf-saved-row').style.display !== 'none';
     var tbStartRaw = document.getElementById('tb-start').value.trim();
     var tbEndRaw   = document.getElementById('tb-end').value.trim();
     var tbStart  = parseInt(tbStartRaw, 10);
     var tbEnd    = parseInt(tbEndRaw, 10);
     var isReextract = rawText.trim().length > 0;
-    if (!tbFile && !hasSaved) { showError('Please choose a PDF file.'); return; }
     if (!tbStartRaw || !tbEndRaw || Number.isNaN(tbStart) || Number.isNaN(tbEnd)) {
       showError('Please enter both start and end page numbers.');
       return;
@@ -330,19 +359,14 @@ _HTML = """<!DOCTYPE html>
 
     try {
       var form = new FormData();
-      if (tbFile) form.append('textbook', tbFile);
       form.append('tb_start', tbStart);
       form.append('tb_end',   tbEnd);
+      if (pendingPdfFile) { form.append('textbook', pendingPdfFile, pendingPdfFile.name); }
       var res = await fetch('/api/extract', { method: 'POST', body: form });
       if (!res.ok) { var e = await res.json(); throw new Error(e.detail || 'Extraction failed'); }
       var data = await res.json();
       rawText = data.text || '';
-
-      if (tbFile) {
-        document.getElementById('pdf-saved-name').textContent = tbFile.name;
-        document.getElementById('pdf-saved-row').style.display  = 'flex';
-        document.getElementById('pdf-picker-row').style.display = 'none';
-      }
+      if (pendingPdfFile) { showPdfReady(pendingPdfFile.name); }
 
       var imgs = data.images || [];
       document.getElementById('extract-status').textContent =
@@ -871,6 +895,8 @@ def pdf_info():
     if SAVED_PDF.exists():
         name = SAVED_PDF_NAME.read_text(encoding="utf-8") if SAVED_PDF_NAME.exists() else "textbook.pdf"
         return {"saved": True, "name": name}
+    if BUNDLED_PDF.exists():
+        return {"saved": True, "name": BUNDLED_PDF_NAME}
     return {"saved": False, "name": None}
 
 
@@ -884,13 +910,15 @@ async def extract(
         with open(SAVED_PDF, "wb") as f:
             shutil.copyfileobj(textbook.file, f)
         SAVED_PDF_NAME.write_text(textbook.filename, encoding="utf-8")
-    elif not SAVED_PDF.exists():
-        raise HTTPException(status_code=400, detail="No PDF uploaded. Please choose a PDF file first.")
+
+    active = _active_pdf()
+    if active is None:
+        raise HTTPException(status_code=400, detail="No PDF available. Please choose a PDF file first.")
 
     for old in OUTPUT_DIR.glob("q_page*"):
         old.unlink(missing_ok=True)
     text, images = await asyncio.to_thread(
-        extract_page_range, str(SAVED_PDF), tb_start, tb_end, OUTPUT_DIR, "q"
+        extract_page_range, str(active), tb_start, tb_end, OUTPUT_DIR, "q"
     )
     with open(OUTPUT_DIR / "raw_text.txt", "w", encoding="utf-8") as f:
         f.write(text)
