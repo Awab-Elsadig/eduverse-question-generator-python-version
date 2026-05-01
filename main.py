@@ -167,11 +167,66 @@ _HTML = """<!DOCTYPE html>
     .img-modal.open { display: flex; }
     .img-modal img { max-width: min(1100px, 96vw); max-height: 90vh; border-radius: 8px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.45); background: white; object-fit: contain; }
     .img-modal-close { position: absolute; top: 14px; right: 14px; border: 1px solid #94a3b8; background: #0f172a; color: white; border-radius: 6px; font-size: 0.78rem; padding: 6px 10px; cursor: pointer; }
+    /* Dark mode toggle */
+    .dm-toggle { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e2e8f0; background: #f1f5f9; color: #475569; cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s; flex-shrink: 0; }
+    .dm-toggle:hover { background: #e2e8f0; color: #1e293b; }
+    /* Dark mode */
+    body.dark { background: #0f172a; color: #e2e8f0; }
+    body.dark .card { background: #1e293b; border-color: #334155; }
+    body.dark .btn-secondary { background: #1e293b; color: #94a3b8; border-color: #334155; }
+    body.dark .btn-secondary:hover { background: #334155; color: #e2e8f0; }
+    body.dark .btn-danger { background: #450a0a; color: #f87171; border-color: #7f1d1d; }
+    body.dark .subtitle { color: #64748b; }
+    body.dark .card-title { color: #64748b; }
+    body.dark .config-sep { color: #475569; }
+    body.dark #extract-status { color: #64748b; }
+    body.dark .config-bar input[type=number] { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+    body.dark .pdf-picker-btn { background: #1e293b; border-color: #475569; color: #94a3b8; }
+    body.dark .pdf-picker-btn:hover { border-color: #2563eb; color: #93c5fd; background: #1e3a5f; }
+    body.dark .pdf-change-link { color: #64748b; }
+    body.dark .pdf-change-link:hover { color: #93c5fd; }
+    body.dark .info-box { background: #1e3a5f; border-color: #1d4ed8; color: #93c5fd; }
+    body.dark .error-box { background: #450a0a; border-color: #7f1d1d; color: #f87171; }
+    body.dark .step-label { color: #64748b; }
+    body.dark textarea.paste-area { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+    body.dark .images-toggle { color: #64748b; }
+    body.dark .images-toggle:hover { color: #94a3b8; }
+    body.dark .filter-btn { background: #1e293b; color: #64748b; border-color: #334155; }
+    body.dark .filter-btn.active { background: #2563eb; color: white; border-color: #2563eb; }
+    body.dark .q-section-title { color: #64748b; }
+    body.dark .q-card { background: #1e293b; border-color: #334155; }
+    body.dark .q-card.active-card { border-color: #2563eb; box-shadow: 0 0 0 4px #1e3a5f; background: #172554; }
+    body.dark .q-num { background: #0f172a; color: #93c5fd; }
+    body.dark .badge-page { background: #1e3a5f; color: #93c5fd; }
+    body.dark .badge-warn { background: #422006; color: #fcd34d; }
+    body.dark .badge-ready { background: #14532d; color: #86efac; }
+    body.dark .badge-skip { background: #1e293b; color: #64748b; }
+    body.dark .q-rendered { color: #e2e8f0; }
+    body.dark .q-text { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+    body.dark .q-text:focus { background: #0f172a; }
+    body.dark .q-notes { color: #475569; }
+    body.dark .exam-toggle { color: #64748b; }
+    body.dark .img-chip { background: #0f172a; border-color: #334155; color: #94a3b8; }
+    body.dark .img-chip img { border-color: #334155; }
+    body.dark .paste-target-pill { background: #1e3a5f; border-color: #1d4ed8; color: #93c5fd; }
+    body.dark .export-bar { background: #1e293b; border-color: #334155; }
+    body.dark .export-bar-left { color: #64748b; }
+    body.dark .export-bar input[type=number], body.dark .export-bar input[type=text] { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+    body.dark .paste-hint { background: #1e3a5f; color: #93c5fd; }
+    body.dark .dm-toggle { background: #1e293b; border-color: #334155; color: #94a3b8; }
+    body.dark .dm-toggle:hover { background: #334155; color: #e2e8f0; }
+    body.dark .workflow-busy { color: #64748b; }
   </style>
 </head>
 <body>
 <div class="container">
-  <h1>Problem Extractor</h1>
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:3px;">
+    <h1>Problem Extractor</h1>
+    <button class="dm-toggle" id="dm-toggle-btn" onclick="toggleDark()" title="Toggle dark mode" aria-label="Toggle dark mode">
+      <svg id="dm-icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg id="dm-icon-sun"  width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    </button>
+  </div>
   <p class="subtitle">Extract text &rarr; Gemini structures problems &rarr; review &amp; export.</p>
 
   <div id="error-box" class="error-box"></div>
@@ -311,7 +366,28 @@ _HTML = """<!DOCTYPE html>
     document.getElementById('pdf-ready-name').textContent = name;
   }
 
-  window.addEventListener('DOMContentLoaded', initPdfState);
+  // ── Dark mode ─────────────────────────────────────────────────────────────
+
+  function applyDark(dark) {
+    document.body.classList.toggle('dark', dark);
+    document.getElementById('dm-icon-moon').style.display = dark ? 'none'  : '';
+    document.getElementById('dm-icon-sun').style.display  = dark ? ''      : 'none';
+  }
+
+  function toggleDark() {
+    var isDark = document.body.classList.contains('dark');
+    applyDark(!isDark);
+    try { localStorage.setItem('dm', !isDark ? '1' : '0'); } catch(e) {}
+  }
+
+  window.addEventListener('DOMContentLoaded', function() {
+    initPdfState();
+    try {
+      var saved = localStorage.getItem('dm');
+      var prefersDark = saved !== null ? saved === '1' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      applyDark(prefersDark);
+    } catch(e) {}
+  });
 
   var KATEX_OPTS = {
     delimiters: [
