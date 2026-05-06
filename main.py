@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -10,7 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+
+load_dotenv()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
@@ -28,6 +33,12 @@ SAVED_PDF_NAME = OUTPUT_DIR / "saved_textbook_name.txt"
 BUNDLED_PDF      = (Path(__file__).parent / "../../Reference and Solution Manual/Modern Control Systems-12 Edition.pdf").resolve()
 BUNDLED_PDF_NAME = "Modern Control Systems-12 Edition.pdf"
 
+EDUVERSE_API_URL = os.getenv("EDUVERSE_API_URL", "https://eduverse-team-eduverse-backend.hf.space")
+EDUVERSE_EMAIL   = os.getenv("EDUVERSE_EMAIL", "")
+EDUVERSE_PASSWORD = os.getenv("EDUVERSE_PASSWORD", "")
+
+_eduverse_token: Optional[str] = None
+
 
 def _active_pdf() -> Optional[Path]:
     """Return the PDF to use: user-uploaded first, then the bundled textbook."""
@@ -37,19 +48,44 @@ def _active_pdf() -> Optional[Path]:
         return BUNDLED_PDF
     return None
 
-GEMINI_PROMPT = """\
-You are extracting end-of-chapter problems from a Control Systems textbook (Modern Control Systems, 12th edition).
 
-The text was extracted via OCR from a scanned PDF and may contain artifacts, merged columns, and garbled spacing. Identify every distinct problem.
+async def _get_eduverse_token() -> str:
+    global _eduverse_token
+    if _eduverse_token:
+        return _eduverse_token
+    if not EDUVERSE_EMAIL or not EDUVERSE_PASSWORD:
+        raise HTTPException(status_code=500, detail="EDUVERSE_EMAIL and EDUVERSE_PASSWORD must be set in .env")
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{EDUVERSE_API_URL}/api/auth/login",
+            json={"email": EDUVERSE_EMAIL, "password": EDUVERSE_PASSWORD},
+            timeout=15,
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"EduVerse login failed: {r.text}")
+    data = r.json()
+    token = data.get("accessToken") or data.get("access_token") or data.get("token")
+    if not token:
+        raise HTTPException(status_code=502, detail=f"EduVerse login response missing token: {data}")
+    _eduverse_token = token
+    return token
+
+
+GEMINI_PROMPT = """\
+You are extracting problems from an academic textbook. The text was extracted via OCR from a scanned PDF and may contain artifacts, merged columns, and garbled spacing. Identify every distinct problem or question.
 
 Return a JSON array where each object has exactly these fields:
-- "question_number": string — the problem label as it appears (e.g. "P1.1", "AP3.4", "DP5.1", "CP2.1")
+- "question_number": string — the problem label as it appears (e.g. "P1.1", "Q3", "Exercise 4.2", "Problem 7")
 - "question": string — complete question text, cleaned of OCR errors. Remove figure captions and page headers. Fix broken words from column wrapping. Format all math using LaTeX: inline with $...$ (e.g. $x_1$, $\\omega_n$, $K > 0$), display with $$...$$.
 - "page": number — page where the problem starts (use the --- PAGE N --- markers)
+- "question_type": string — one of exactly: "written", "mcq", "true_false". Use "mcq" only if the question lists labeled answer choices (A/B/C/D or similar). Use "true_false" only if the question is a direct true-or-false statement. Use "written" for everything else (derivations, calculations, short answer, design problems).
+- "difficulty": string — one of exactly: "easy", "medium", "hard". Base this on cognitive load and prerequisite knowledge: easy = recall or single-step, medium = multi-step application, hard = synthesis, design, or proof.
+- "bloom_level": string — one of exactly: "remembering", "understanding", "applying", "analyzing", "evaluating", "creating". Pick the highest Bloom's taxonomy level the question primarily demands.
 - "has_diagram": boolean — true if the question references a Figure, asks to sketch a diagram or block diagram, or involves a circuit
 - "figure_reference": string or null — specific figure label when present (e.g. "Figure 13.18", "Fig. P1.2"), otherwise null
 - "exam_ready": boolean — true if suitable for a university exam. Mark false for: pure discussion/describe questions, problems entirely dependent on a figure students won't have, or questions too open-ended to grade objectively.
 - "exam_notes": string or null — if exam_ready is false, a brief reason (e.g. "discussion only", "requires Figure P1.2", "open-ended design"). If exam_ready is true, use null.
+- "expected_answer": string or null — for "written" and "true_false" question types only: a concise model answer (1–4 sentences or key steps). For "mcq" use null (the correct option already encodes the answer).
 
 Return ONLY a valid JSON array wrapped in ```json fences. No explanation.
 
@@ -66,6 +102,7 @@ _HTML = """<!DOCTYPE html>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
     onload="onKatexReady()"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.5; }
@@ -90,6 +127,10 @@ _HTML = """<!DOCTYPE html>
     /* Config bar */
     .config-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
     .config-bar input[type=number] { width: 68px; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; font-family: inherit; text-align: center; }
+    /* Plain number fields: no stepper arrows, no wheel nudging */
+    input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
     .config-bar input:focus { outline: none; border-color: #2563eb; }
     .config-sep { color: #94a3b8; font-size: 0.85rem; }
     #extract-status { font-size: 0.78rem; color: #64748b; }
@@ -97,14 +138,7 @@ _HTML = """<!DOCTYPE html>
     .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.4); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     /* PDF picker */
-    .pdf-picker-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px; background: #f8fafc; border: 1.5px dashed #cbd5e1; border-radius: 6px; font-size: 0.78rem; font-weight: 600; color: #475569; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; user-select: none; }
-    .pdf-picker-btn:hover { border-color: #2563eb; color: #2563eb; background: #eff6ff; }
-    .pdf-ready-pill { display: none; align-items: center; gap: 7px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 5px 11px; font-size: 0.78rem; color: #166534; max-width: 340px; }
-    .pdf-ready-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-    .pdf-pending-pill { display: none; align-items: center; gap: 7px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 5px 11px; font-size: 0.78rem; color: #92400e; max-width: 380px; }
-    .pdf-pending-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
-    .pdf-change-link { font-size: 0.7rem; color: #64748b; text-decoration: underline; cursor: pointer; flex-shrink: 0; }
-    .pdf-change-link:hover { color: #2563eb; }
+    .pdf-change-link { font-size: 0.7rem; color: #64748b; text-decoration: underline; flex-shrink: 0; }
     /* Workflow grid */
     .workflow-grid { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
     .workflow-grid .card { flex: 1; min-width: 260px; margin-bottom: 0; }
@@ -123,8 +157,21 @@ _HTML = """<!DOCTYPE html>
     /* Question sections */
     .q-section { margin-bottom: 18px; }
     .q-section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #475569; margin: 10px 0 8px; }
+    /* Locked state (before PDF chosen) */
+    .locked { opacity: 0.4; pointer-events: none; user-select: none; }
+    /* PDF picker pill — whole thing is clickable */
+    .pdf-picker-label { display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px; background: #f8fafc; border: 1.5px dashed #cbd5e1; border-radius: 6px; font-size: 0.78rem; font-weight: 600; color: #475569; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; user-select: none; }
+    .pdf-picker-label:hover { border-color: #2563eb; color: #2563eb; background: #eff6ff; }
+    .pdf-ready-pill  { display: none; align-items: center; gap: 7px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 5px 11px; font-size: 0.78rem; color: #166534; max-width: 340px; cursor: pointer; }
+    .pdf-ready-pill:hover  { background: #dcfce7; }
+    .pdf-ready-name  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+    .pdf-pending-pill { display: none; align-items: center; gap: 7px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 5px 11px; font-size: 0.78rem; color: #92400e; max-width: 380px; cursor: pointer; }
+    .pdf-pending-pill:hover { background: #fef9c3; }
+    .pdf-pending-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+    body.dark .pdf-picker-label { background: #1e293b; border-color: #475569; color: #94a3b8; }
+    body.dark .pdf-picker-label:hover { border-color: #2563eb; color: #93c5fd; background: #1e3a5f; }
     /* Problem cards */
-    .q-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 10px; transition: border-color 0.15s; cursor: default; }
+    .q-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 10px; transition: border-color 0.15s; cursor: pointer; }
     .q-card.active-card { border-color: #2563eb; box-shadow: 0 0 0 4px #bfdbfe; background: #f8fbff; }
     .q-card.flash { border-color: #4ade80; box-shadow: 0 0 0 3px #f0fdf4; }
     .q-header { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -142,6 +189,10 @@ _HTML = """<!DOCTYPE html>
     .exam-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 0.73rem; color: #64748b; cursor: pointer; user-select: none; margin-left: auto; }
     .exam-toggle input[type=checkbox] { cursor: pointer; }
     .q-notes { font-size: 0.71rem; color: #94a3b8; margin-top: 5px; font-style: italic; }
+    .q-answer-wrap { margin-top: 8px; }
+    .q-answer-body { margin-top: 4px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
+    .q-answer-body.hidden { display: none; }
+    .ans-rendered { font-size: 0.875rem; line-height: 1.9; min-height: 2em; overflow-x: auto; }
     .chips-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .img-chip { display: inline-flex; align-items: center; gap: 5px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 3px 8px 3px 3px; font-size: 0.72rem; color: #475569; }
     .img-chip img { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; cursor: zoom-in; border: 1px solid #cbd5e1; }
@@ -150,9 +201,23 @@ _HTML = """<!DOCTYPE html>
     .img-chip-remove { background: none; border: none; cursor: pointer; color: #94a3b8; font-size: 1rem; line-height: 1; padding: 0; }
     .img-chip-remove:hover { color: #dc2626; }
     /* Export bar */
-    .export-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 1px solid #e2e8f0; padding: 10px 24px; display: none; justify-content: space-between; align-items: center; z-index: 100; }
+    .export-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 1px solid #e2e8f0; padding: 8px 24px; display: none; justify-content: space-between; align-items: center; z-index: 100; flex-wrap: wrap; gap: 8px; min-height: 52px; }
     .export-bar-left { display: flex; align-items: center; gap: 14px; font-size: 0.82rem; color: #64748b; }
     .paste-hint { font-size: 0.75rem; color: #2563eb; background: #eff6ff; padding: 2px 8px; border-radius: 4px; }
+    /* EduVerse save panel — fixed above export bar */
+    .ev-panel { position: fixed; bottom: 52px; left: 0; right: 0; background: #f0fdf4; border-top: 1px solid #bbf7d0; padding: 12px 24px; display: none; z-index: 99; box-shadow: 0 -4px 16px rgba(0,0,0,0.08); }
+    .ev-panel.open { display: block; }
+    body.dark .ev-panel { background: #052e16; border-color: #166534; box-shadow: 0 -4px 16px rgba(0,0,0,0.4); }
+    .ev-panel-title { font-size: 0.78rem; font-weight: 700; color: #166534; margin-bottom: 10px; }
+    .ev-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .ev-row input[type=number] { width: 100px; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.82rem; font-family: inherit; }
+    .ev-row input[type=number]:focus { outline: none; border-color: #16a34a; }
+    .ev-status { font-size: 0.78rem; margin-top: 8px; color: #64748b; min-height: 18px; }
+    .ev-status.ok  { color: #166534; }
+    .ev-status.err { color: #dc2626; }
+    body.dark .ev-panel { background: #052e16; border-color: #166534; }
+    body.dark .ev-panel-title { color: #86efac; }
+    body.dark .ev-row input[type=number] { background: #0f172a; border-color: #334155; color: #e2e8f0; }
     /* Toast */
     .toast { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 7px 16px; border-radius: 6px; font-size: 0.78rem; z-index: 200; pointer-events: none; opacity: 0; transition: opacity 0.2s; }
     .toast.show { opacity: 1; }
@@ -181,10 +246,7 @@ _HTML = """<!DOCTYPE html>
     body.dark .config-sep { color: #475569; }
     body.dark #extract-status { color: #64748b; }
     body.dark .config-bar input[type=number] { background: #0f172a; border-color: #334155; color: #e2e8f0; }
-    body.dark .pdf-picker-btn { background: #1e293b; border-color: #475569; color: #94a3b8; }
-    body.dark .pdf-picker-btn:hover { border-color: #2563eb; color: #93c5fd; background: #1e3a5f; }
     body.dark .pdf-change-link { color: #64748b; }
-    body.dark .pdf-change-link:hover { color: #93c5fd; }
     body.dark .info-box { background: #1e3a5f; border-color: #1d4ed8; color: #93c5fd; }
     body.dark .error-box { background: #450a0a; border-color: #7f1d1d; color: #f87171; }
     body.dark .step-label { color: #64748b; }
@@ -204,6 +266,8 @@ _HTML = """<!DOCTYPE html>
     body.dark .q-rendered { color: #e2e8f0; }
     body.dark .q-text { background: #0f172a; border-color: #334155; color: #e2e8f0; }
     body.dark .q-text:focus { background: #0f172a; }
+    body.dark .q-answer-body { background: #0f172a; border-color: #334155; }
+    body.dark .ans-rendered { color: #e2e8f0; }
     body.dark .q-notes { color: #475569; }
     body.dark .exam-toggle { color: #64748b; }
     body.dark .img-chip { background: #0f172a; border-color: #334155; color: #94a3b8; }
@@ -231,54 +295,58 @@ _HTML = """<!DOCTYPE html>
 
   <div id="error-box" class="error-box"></div>
 
+  <input type="file" id="pdf-file-input" accept=".pdf" style="display:none;" onchange="handlePdfSelect(this)">
+
   <!-- ── Config bar ── -->
-  <div class="card" style="margin-bottom:16px;">
+  <div id="config-card" class="card" style="margin-bottom:16px;">
     <div class="config-bar">
-      <!-- PDF picker -->
-      <input type="file" id="pdf-file-input" accept=".pdf" style="display:none;" onchange="handlePdfSelect(this)">
-      <label id="pdf-picker-btn" class="pdf-picker-btn" for="pdf-file-input">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <!-- PDF picker: whole element is clickable -->
+      <label id="pdf-picker-label" class="pdf-picker-label" for="pdf-file-input">
+        <i data-lucide="book-open" style="width:13px;height:13px;"></i>
         Choose PDF
       </label>
-      <div id="pdf-ready-pill" class="pdf-ready-pill">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      <label id="pdf-ready-pill" class="pdf-ready-pill" for="pdf-file-input">
+        <i data-lucide="check-circle" style="width:13px;height:13px;flex-shrink:0;"></i>
         <span id="pdf-ready-name" class="pdf-ready-name"></span>
-        <span class="pdf-change-link" onclick="document.getElementById('pdf-file-input').click()">Change</span>
-      </div>
-      <div id="pdf-pending-pill" class="pdf-pending-pill">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span class="pdf-change-link">Change</span>
+      </label>
+      <label id="pdf-pending-pill" class="pdf-pending-pill" for="pdf-file-input">
+        <i data-lucide="clock" style="width:13px;height:13px;flex-shrink:0;"></i>
         <span id="pdf-pending-name" class="pdf-pending-name"></span>
         <span style="color:#a16207;font-size:0.68rem;flex-shrink:0;">uploads on Extract</span>
-        <span class="pdf-change-link" onclick="document.getElementById('pdf-file-input').click()">Change</span>
-      </div>
-      <!-- Divider -->
-      <span class="config-sep">|</span>
-      <!-- Pages -->
-      <span style="font-size:0.78rem;color:#64748b;">Pages</span>
-      <input id="tb-start" type="number" min="1" placeholder="Start">
-      <span class="config-sep">&ndash;</span>
-      <input id="tb-end" type="number" min="1" placeholder="End">
-      <!-- Extract -->
-      <button id="extract-btn" class="btn btn-primary btn-sm" onclick="startExtract()">Extract</button>
-      <span id="extract-status"></span>
+        <span class="pdf-change-link">Change</span>
+      </label>
+      <!-- Extract controls — locked until PDF chosen -->
+      <span id="extract-controls" class="locked" style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span class="config-sep">|</span>
+        <span style="font-size:0.78rem;color:#64748b;">Pages</span>
+        <input id="tb-start" type="number" min="1" placeholder="Start">
+        <span class="config-sep">&ndash;</span>
+        <input id="tb-end" type="number" min="1" placeholder="End">
+        <button id="extract-btn" class="btn btn-primary btn-sm" onclick="startExtract()">
+          <i data-lucide="scan-text" style="width:13px;height:13px;"></i>
+          Extract
+        </button>
+        <span id="extract-status"></span>
+      </span>
     </div>
   </div>
 
-  <!-- ── Workflow (always available) ── -->
-  <div id="workflow-section">
+  <!-- ── Workflow — locked until PDF chosen ── -->
+  <div id="workflow-section" class="locked">
     <div class="workflow-grid">
       <div class="card">
         <div class="step-label"><span class="step-num">1</span> Copy &amp; paste into <a href="https://gemini.google.com" target="_blank" style="color:#2563eb;">gemini.google.com</a></div>
         <div class="info-box">Copies the full prompt + your extracted text in one click.</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button id="copy-btn" class="btn btn-primary btn-sm" onclick="copyForGemini()">Copy prompt + text</button>
-          <button id="download-raw-btn" class="btn btn-secondary btn-sm" onclick="downloadRawText()">Download .txt</button>
+          <button id="copy-btn" class="btn btn-primary btn-sm" onclick="copyForGemini()"><i data-lucide="clipboard-copy" style="width:13px;height:13px;"></i> Copy prompt + text</button>
+          <button id="download-raw-btn" class="btn btn-secondary btn-sm" onclick="downloadRawText()"><i data-lucide="download" style="width:13px;height:13px;"></i> Download .txt</button>
         </div>
       </div>
       <div class="card">
         <div class="step-label"><span class="step-num">2</span> Paste Gemini&rsquo;s JSON response</div>
         <textarea id="json-paste" class="paste-area" placeholder="Paste here (with or without the ```json fences)..."></textarea>
-        <button id="load-json-btn" class="btn btn-success btn-sm" onclick="loadFromJSON()">Load Problems &rarr;</button>
+        <button id="load-json-btn" class="btn btn-success btn-sm" onclick="loadFromJSON()"><i data-lucide="list-checks" style="width:13px;height:13px;"></i> Load Problems</button>
       </div>
     </div>
     <div id="workflow-busy" class="workflow-busy">
@@ -297,6 +365,11 @@ _HTML = """<!DOCTYPE html>
 
   <!-- ── Review (appears after loading JSON) ── -->
   <div id="review-section" style="display:none;">
+    <div id="refresh-warning" style="display:flex;align-items:center;gap:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:0.8rem;color:#92400e;">
+      <i data-lucide="triangle-alert" style="width:15px;height:15px;flex-shrink:0;"></i>
+      <span>Your questions live in memory only — <strong>refreshing this page will clear everything.</strong> Export JSON or Save to EduVerse before leaving.</span>
+      <button onclick="document.getElementById('refresh-warning').style.display='none'" style="margin-left:auto;background:none;border:none;cursor:pointer;color:#92400e;flex-shrink:0;"><i data-lucide="x" style="width:14px;height:14px;"></i></button>
+    </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
       <p id="review-meta" style="font-size:0.82rem;color:#64748b;"></p>
     </div>
@@ -305,6 +378,22 @@ _HTML = """<!DOCTYPE html>
       <button class="btn btn-sm filter-btn"        id="filter-ready" onclick="setFilter('ready')">Exam ready (0)</button>
     </div>
     <div id="problems-list"></div>
+  </div>
+</div>
+
+<!-- EduVerse save panel (shown above export bar when open) -->
+<div id="ev-panel" class="ev-panel">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+    <span style="font-size:0.78rem;font-weight:700;color:#166534;display:inline-flex;align-items:center;gap:5px;flex-shrink:0;">
+      <i data-lucide="database-zap" style="width:13px;height:13px;"></i> Save to EduVerse
+    </span>
+    <label style="font-size:0.78rem;color:#475569;flex-shrink:0;">Course ID</label>
+    <input id="ev-course-id" type="number" min="1" placeholder="e.g. 2" style="width:90px;padding:5px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.82rem;font-family:inherit;">
+    <label style="font-size:0.78rem;color:#475569;flex-shrink:0;">Chapter ID</label>
+    <input id="ev-chapter-id" type="number" min="1" placeholder="e.g. 1" style="width:90px;padding:5px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.82rem;font-family:inherit;">
+    <button class="btn btn-success btn-sm" onclick="saveToEduverse(this)"><i data-lucide="send" style="width:13px;height:13px;"></i> Save exam-ready</button>
+    <button class="btn btn-secondary btn-sm" onclick="toggleEvPanel()"><i data-lucide="x" style="width:13px;height:13px;"></i> Cancel</button>
+    <span id="ev-status" class="ev-status" style="margin-top:0;"></span>
   </div>
 </div>
 
@@ -317,8 +406,9 @@ _HTML = """<!DOCTYPE html>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <input id="chapter-export" type="number" min="1" placeholder="Chapter" style="width:88px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.78rem;">
     <input id="teammate-export" type="text" placeholder="Teammate (optional)" style="width:160px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.78rem;">
-    <button class="btn btn-secondary btn-sm" onclick="exportChapterZip(this)">Export chapter ZIP</button>
-    <button class="btn btn-success btn-sm"   onclick="exportJSON()">Export JSON</button>
+    <button class="btn btn-secondary btn-sm" onclick="exportChapterZip(this)"><i data-lucide="archive" style="width:13px;height:13px;"></i> Export ZIP</button>
+    <button class="btn btn-secondary btn-sm" onclick="exportJSON()"><i data-lucide="file-json" style="width:13px;height:13px;"></i> Export JSON</button>
+    <button class="btn btn-primary btn-sm"   onclick="toggleEvPanel()"><i data-lucide="database-zap" style="width:13px;height:13px;"></i> Save to EduVerse</button>
   </div>
 </div>
 
@@ -336,34 +426,40 @@ _HTML = """<!DOCTYPE html>
   var activeFilter  = 'all';
   var activeCardIdx = null;
   var pendingPdfFile = null;
+  var hasPdf = false;
+
+  // ── PDF gate helpers ──────────────────────────────────────────────────────
+
+  function unlockWorkflow() {
+    hasPdf = true;
+    document.getElementById('extract-controls').classList.remove('locked');
+    document.getElementById('workflow-section').classList.remove('locked');
+  }
 
   // ── PDF state ─────────────────────────────────────────────────────────────
 
   function initPdfState() {
-    fetch('/api/pdf-info').then(function(r) { return r.json(); }).then(function(d) {
-      if (d.saved && d.name) { showPdfReady(d.name); }
-    }).catch(function() {});
+    // Do NOT auto-activate saved/bundled PDF — require explicit selection each session.
   }
 
   function handlePdfSelect(input) {
     var file = input.files && input.files[0];
     if (!file) return;
     pendingPdfFile = file;
-    document.getElementById('pdf-picker-btn').style.display = 'none';
-    document.getElementById('pdf-ready-pill').style.display  = 'none';
-    var pill = document.getElementById('pdf-pending-pill');
-    pill.style.display = 'inline-flex';
-    document.getElementById('pdf-pending-name').textContent = file.name;
+    document.getElementById('pdf-picker-label').style.display = 'none';
+    document.getElementById('pdf-ready-pill').style.display   = 'none';
+    document.getElementById('pdf-pending-pill').style.display = 'inline-flex';
+    document.getElementById('pdf-pending-name').textContent   = file.name;
     input.value = '';
+    unlockWorkflow();
   }
 
   function showPdfReady(name) {
     pendingPdfFile = null;
-    document.getElementById('pdf-picker-btn').style.display  = 'none';
+    document.getElementById('pdf-picker-label').style.display = 'none';
     document.getElementById('pdf-pending-pill').style.display = 'none';
-    var pill = document.getElementById('pdf-ready-pill');
-    pill.style.display = 'inline-flex';
-    document.getElementById('pdf-ready-name').textContent = name;
+    document.getElementById('pdf-ready-pill').style.display   = 'inline-flex';
+    document.getElementById('pdf-ready-name').textContent     = name;
   }
 
   // ── Dark mode ─────────────────────────────────────────────────────────────
@@ -380,13 +476,25 @@ _HTML = """<!DOCTYPE html>
     try { localStorage.setItem('dm', !isDark ? '1' : '0'); } catch(e) {}
   }
 
+  function initNumberInputsNoWheel() {
+    document.querySelectorAll('input[type="number"]').forEach(function(el) {
+      el.addEventListener('wheel', function(e) { e.preventDefault(); }, { passive: false });
+    });
+  }
+
+  window.addEventListener('beforeunload', function(e) {
+    if (problems.length > 0) { e.preventDefault(); e.returnValue = ''; }
+  });
+
   window.addEventListener('DOMContentLoaded', function() {
     initPdfState();
+    initNumberInputsNoWheel();
     try {
       var saved = localStorage.getItem('dm');
       var prefersDark = saved !== null ? saved === '1' : window.matchMedia('(prefers-color-scheme: dark)').matches;
       applyDark(prefersDark);
     } catch(e) {}
+    lucide.createIcons();
   });
 
   var KATEX_OPTS = {
@@ -416,6 +524,7 @@ _HTML = """<!DOCTYPE html>
 
   async function startExtract() {
     hideError();
+    if (!hasPdf && !pendingPdfFile) { showError('Choose a PDF first.'); return; }
     var tbStartRaw = document.getElementById('tb-start').value.trim();
     var tbEndRaw   = document.getElementById('tb-end').value.trim();
     var tbStart  = parseInt(tbStartRaw, 10);
@@ -446,7 +555,7 @@ _HTML = """<!DOCTYPE html>
 
       var imgs = data.images || [];
       document.getElementById('extract-status').textContent =
-        '\\u2713 ' + (data.char_count || 0).toLocaleString() + ' chars \\u00b7 ' + imgs.length + ' images';
+        '✓ ' + (data.char_count || 0).toLocaleString() + ' chars · ' + imgs.length + ' images';
       showToast(
         isReextract
           ? 'Re-extraction complete. Text and images refreshed.'
@@ -485,7 +594,7 @@ _HTML = """<!DOCTYPE html>
     document.getElementById('images-toggle-label').textContent = 'Page images (' + imgs.length + ')';
     toggle.style.display = 'inline-flex';
     document.getElementById('images-section').style.display = 'none';
-    document.getElementById('images-arrow').textContent = '\\u25ba';
+    document.getElementById('images-arrow').textContent = '▶';
     imgs.forEach(function(img) {
       var src     = '/output/' + img.filename;
       var wrapper = document.createElement('div');
@@ -512,7 +621,7 @@ _HTML = """<!DOCTYPE html>
     var arrow   = document.getElementById('images-arrow');
     var open    = section.style.display !== 'none';
     section.style.display = open ? 'none' : 'block';
-    arrow.textContent     = open ? '\\u25ba' : '\\u25bc';
+    arrow.textContent     = open ? '▶' : '▼';
   }
 
   function openImageModal(src) {
@@ -564,25 +673,29 @@ _HTML = """<!DOCTYPE html>
       problems = parsed.map(function(q) {
         var figureReference = q.figure_reference ? String(q.figure_reference) : detectFigureReference(String(q.question || ''));
         return {
-          question_number: String(q.question_number || ''),
-          question:        String(q.question || ''),
-          page:            q.page || null,
-          has_diagram:     Boolean(q.has_diagram),
+          question_number:  String(q.question_number || ''),
+          question:         String(q.question || ''),
+          page:             q.page || null,
+          question_type:    q.question_type || 'written',
+          difficulty:       q.difficulty || 'medium',
+          bloom_level:      q.bloom_level || 'applying',
+          has_diagram:      Boolean(q.has_diagram),
           figure_reference: figureReference || null,
-          exam_ready:      q.exam_ready !== false,
-          exam_notes:      q.exam_notes || null,
-          answer:          q.answer || null,
-          images:          [],
+          exam_ready:       q.exam_ready !== false,
+          exam_notes:       q.exam_notes || null,
+          expected_answer:  q.expected_answer || null,
+          images:           [],
         };
       });
       var ready = problems.filter(function(q) { return q.exam_ready; }).length;
       document.getElementById('review-meta').textContent =
-        problems.length + ' problems loaded \\u00b7 ' + ready + ' exam ready';
+        problems.length + ' problems loaded · ' + ready + ' exam ready';
       updateFilterCounts();
       renderProblems();
       var rs = document.getElementById('review-section');
       rs.style.display = 'block';
       document.getElementById('export-bar').style.display = 'flex';
+      lucide.createIcons();
       setTimeout(function() { rs.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 80);
     } catch(e) { showError('Could not parse JSON: ' + e.message); }
   }
@@ -617,27 +730,21 @@ _HTML = """<!DOCTYPE html>
 
   // ── Problems ──────────────────────────────────────────────────────────────
 
-  var TYPE_LABELS = {
-    AP: 'Advanced Problems',
-    P:  'Problems',
-    E:  'Exercises',
-    DP: 'Design Problems',
-    CP: 'Computer Problems',
-    EP: 'Extension Problems',
+  var QTYPE_LABELS = {
+    'mcq':        'Multiple Choice',
+    'true_false': 'True / False',
+    'written':    'Written / Open-ended',
+    'essay':      'Essay',
   };
+  var QTYPE_ORDER = ['mcq', 'true_false', 'written', 'essay'];
 
-  var TYPE_ORDER = ['AP', 'P', 'E', 'DP', 'CP', 'EP', 'OTHER'];
-
-  function getQuestionTypeCode(questionNumber) {
-    var qn = String(questionNumber || '').trim().toUpperCase();
-    var m = qn.match(/^([A-Z]+)\s*\d/);
-    if (!m) return 'OTHER';
-    return m[1];
+  function getGroupKey(questionType) {
+    var t = String(questionType || '').toLowerCase();
+    return QTYPE_LABELS[t] ? t : 'written';
   }
 
-  function getQuestionTypeLabel(typeCode) {
-    if (TYPE_LABELS[typeCode]) return TYPE_LABELS[typeCode];
-    return typeCode === 'OTHER' ? 'Other' : (typeCode + ' Questions');
+  function getGroupLabel(key) {
+    return QTYPE_LABELS[key] || 'Written / Open-ended';
   }
 
   function detectFigureReference(text) {
@@ -645,14 +752,6 @@ _HTML = """<!DOCTYPE html>
     var m = src.match(/\\b(?:Figure|Fig\\.?)\\s*([A-Za-z]?\\d+(?:\\.\\d+)*)\\b/i);
     if (!m) return null;
     return 'Figure ' + m[1];
-  }
-
-  function getSortedTypeCodes(grouped) {
-    var known = TYPE_ORDER.filter(function(code) { return grouped[code] && grouped[code].length; });
-    var unknown = Object.keys(grouped).filter(function(code) {
-      return TYPE_ORDER.indexOf(code) === -1 && grouped[code] && grouped[code].length;
-    }).sort();
-    return known.concat(unknown);
   }
 
   function renderProblems() {
@@ -666,19 +765,21 @@ _HTML = """<!DOCTYPE html>
 
     var grouped = {};
     problems.forEach(function(q, idx) {
-      var typeCode = getQuestionTypeCode(q.question_number);
+      var typeCode = getGroupKey(q.question_type);
       if (!grouped[typeCode]) grouped[typeCode] = [];
       grouped[typeCode].push({ question: q, index: idx });
     });
 
-    getSortedTypeCodes(grouped).forEach(function(typeCode) {
+    var orderedKeys = QTYPE_ORDER.filter(function(k) { return grouped[k] && grouped[k].length; });
+
+    orderedKeys.forEach(function(typeCode) {
       var section = document.createElement('section');
       section.className = 'q-section';
       section.dataset.type = typeCode;
 
       var title = document.createElement('div');
       title.className = 'q-section-title';
-      title.textContent = getQuestionTypeLabel(typeCode) + ' (' + grouped[typeCode].length + ')';
+      title.textContent = getGroupLabel(typeCode) + ' (' + grouped[typeCode].length + ')';
       section.appendChild(title);
 
       grouped[typeCode].forEach(function(item) {
@@ -689,6 +790,27 @@ _HTML = """<!DOCTYPE html>
 
     applyFilter();
   }
+
+  function mkIcon(pathData, size) {
+    size = size || 12;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', size); svg.setAttribute('height', size);
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2.5');
+    svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+    svg.style.cssText = 'flex-shrink:0;vertical-align:middle;';
+    svg.innerHTML = pathData;
+    return svg;
+  }
+  var IC = {
+    check: '<polyline points="20 6 9 17 4 12"/>',
+    x:     '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    warn:  '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    edit:  '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
+    done:  '<polyline points="20 6 9 17 4 12"/>',
+    trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>',
+    img:   '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',
+  };
 
   function buildCard(q, idx) {
     var card = document.createElement('div');
@@ -706,21 +828,50 @@ _HTML = """<!DOCTYPE html>
       var pg = document.createElement('span'); pg.className = 'badge badge-page';
       pg.textContent = 'Page ' + q.page; header.appendChild(pg);
     }
+    if (q.question_type && q.question_type !== 'written') {
+      var qt = document.createElement('span'); qt.className = 'badge badge-page';
+      qt.textContent = q.question_type.replace('_', '/'); header.appendChild(qt);
+    }
+    if (q.difficulty) {
+      var diff = document.createElement('span');
+      diff.className = 'badge ' + (q.difficulty === 'hard' ? 'badge-warn' : q.difficulty === 'easy' ? 'badge-ready' : 'badge-skip');
+      diff.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
+      diff.title = 'Difficulty';
+      diff.appendChild(mkIcon('<path d="M2 20h20M6 20V10l6-8 6 8v10"/>', 11));
+      diff.appendChild(document.createTextNode(' ' + q.difficulty));
+      header.appendChild(diff);
+    }
+    if (q.bloom_level) {
+      var bl = document.createElement('span'); bl.className = 'badge badge-skip';
+      bl.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
+      bl.title = "Bloom's Taxonomy level";
+      bl.appendChild(mkIcon('<path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 12V2"/><path d="M12 12l6.5-6.5"/>', 11));
+      bl.appendChild(document.createTextNode(' ' + q.bloom_level));
+      header.appendChild(bl);
+    }
     if (q.figure_reference || q.has_diagram) {
       var dg = document.createElement('span'); dg.className = 'badge badge-warn';
-      dg.textContent = '\\u26a0 ' + (q.figure_reference || 'diagram'); header.appendChild(dg);
+      dg.id = 'diag-badge-' + idx;
+      dg.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
+      dg.title = 'References a diagram — attach an image to resolve';
+      dg.appendChild(mkIcon(IC.warn, 11));
+      dg.appendChild(document.createTextNode(' ' + (q.figure_reference || 'diagram needed')));
+      header.appendChild(dg);
     }
     var eb = document.createElement('span');
     eb.id = 'exam-badge-' + idx;
     eb.className = 'badge ' + (q.exam_ready ? 'badge-ready' : 'badge-skip');
-    eb.textContent = q.exam_ready ? '\\u2713 exam ready' : '\\u00d7 skip';
+    eb.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
+    eb.appendChild(mkIcon(q.exam_ready ? IC.check : IC.x, 11));
+    eb.appendChild(document.createTextNode(q.exam_ready ? ' exam ready' : ' skip'));
     header.appendChild(eb);
     var targetPill = document.createElement('span');
     targetPill.className = 'paste-target-pill';
     targetPill.textContent = 'Ctrl+V target';
     header.appendChild(targetPill);
     var sp = document.createElement('div'); sp.style.flex = '1'; header.appendChild(sp);
-    var del = document.createElement('button'); del.className = 'btn btn-danger btn-sm'; del.textContent = 'Delete';
+    var del = document.createElement('button'); del.className = 'btn btn-danger btn-sm'; del.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+    del.appendChild(mkIcon(IC.trash, 12)); del.appendChild(document.createTextNode(' Delete'));
     del.addEventListener('click', (function(i) {
       return function(e) { e.stopPropagation(); problems.splice(i,1); updateFilterCounts(); renderProblems(); };
     })(idx));
@@ -739,8 +890,10 @@ _HTML = """<!DOCTYPE html>
     // Controls
     var controls = document.createElement('div'); controls.className = 'q-controls';
 
-    var editBtn = document.createElement('button'); editBtn.className = 'btn btn-secondary btn-xs'; editBtn.textContent = 'Edit';
-    var doneBtn = document.createElement('button'); doneBtn.className = 'btn btn-primary btn-xs'; doneBtn.textContent = 'Done'; doneBtn.style.display = 'none';
+    var editBtn = document.createElement('button'); editBtn.className = 'btn btn-secondary btn-xs'; editBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+    editBtn.appendChild(mkIcon(IC.edit, 11)); editBtn.appendChild(document.createTextNode(' Edit'));
+    var doneBtn = document.createElement('button'); doneBtn.className = 'btn btn-primary btn-xs'; doneBtn.style.display = 'none'; doneBtn.style.cssText = 'display:none;align-items:center;gap:4px;';
+    doneBtn.appendChild(mkIcon(IC.done, 11)); doneBtn.appendChild(document.createTextNode(' Done'));
     editBtn.addEventListener('click', function(e) {
       e.stopPropagation(); renderDiv.style.display = 'none'; ta.style.display = 'block'; ta.focus();
       editBtn.style.display = 'none'; doneBtn.style.display = 'inline-flex';
@@ -770,7 +923,8 @@ _HTML = """<!DOCTYPE html>
       };
     })(idx));
     card.appendChild(fi);
-    var attachBtn = document.createElement('button'); attachBtn.className = 'btn btn-secondary btn-xs'; attachBtn.textContent = '+ Attach diagram';
+    var attachBtn = document.createElement('button'); attachBtn.className = 'btn btn-secondary btn-xs'; attachBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+    attachBtn.appendChild(mkIcon(IC.img, 11)); attachBtn.appendChild(document.createTextNode(' Attach diagram'));
     attachBtn.addEventListener('click', function(e) { e.stopPropagation(); fi.click(); });
     controls.appendChild(attachBtn);
 
@@ -782,7 +936,13 @@ _HTML = """<!DOCTYPE html>
         problems[i].exam_ready = e.target.checked;
         cardEl.dataset.examReady = e.target.checked ? '1' : '0';
         var badge = document.getElementById('exam-badge-' + i);
-        if (badge) { badge.className = 'badge ' + (e.target.checked ? 'badge-ready' : 'badge-skip'); badge.textContent = e.target.checked ? '\\u2713 exam ready' : '\\u00d7 skip'; }
+        if (badge) {
+          badge.className = 'badge ' + (e.target.checked ? 'badge-ready' : 'badge-skip');
+          badge.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
+          badge.innerHTML = '';
+          badge.appendChild(mkIcon(e.target.checked ? IC.check : IC.x, 11));
+          badge.appendChild(document.createTextNode(e.target.checked ? ' exam ready' : ' skip'));
+        }
         applyFilter(); updateFilterCounts();
       };
     })(idx, card));
@@ -797,6 +957,57 @@ _HTML = """<!DOCTYPE html>
       notes.textContent = 'Note: ' + q.exam_notes; card.appendChild(notes);
     }
 
+    // Model answer (written / true_false only)
+    if (q.question_type === 'written' || q.question_type === 'true_false') {
+      var ansWrap = document.createElement('div'); ansWrap.className = 'q-answer-wrap';
+      var ansToggle = document.createElement('button'); ansToggle.type = 'button'; ansToggle.className = 'btn btn-secondary btn-xs ans-toggle';
+      ansToggle.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-bottom:4px;';
+      ansToggle.appendChild(mkIcon(IC.done, 11)); ansToggle.appendChild(document.createTextNode(' Model answer'));
+      var ansBody = document.createElement('div'); ansBody.className = 'q-answer-body hidden';
+      // Rendered view (mirrors q-rendered)
+      var ansRenderDiv = document.createElement('div'); ansRenderDiv.className = 'q-rendered ans-rendered';
+      ansRenderDiv.style.cssText = 'min-height:2em;cursor:text;';
+      ansRenderDiv.textContent = q.expected_answer || '(no answer yet — click Edit to add)';
+      if (q.expected_answer) renderMath(ansRenderDiv);
+      // Edit textarea (mirrors q-text but always visible when shown)
+      var ansTa = document.createElement('textarea'); ansTa.className = 'q-text ans-ta';
+      ansTa.rows = 3; ansTa.style.display = 'none';
+      ansTa.placeholder = 'Enter expected answer…';
+      ansTa.value = q.expected_answer || '';
+      ansTa.addEventListener('change', (function(i) { return function(e) { problems[i].expected_answer = e.target.value; }; })(idx));
+      ansTa.addEventListener('input',  (function(i) { return function(e) { problems[i].expected_answer = e.target.value; }; })(idx));
+      // Edit / Done controls
+      var ansControls = document.createElement('div'); ansControls.style.cssText = 'display:flex;gap:6px;margin-top:6px;';
+      var ansEditBtn = document.createElement('button'); ansEditBtn.type = 'button'; ansEditBtn.className = 'btn btn-secondary btn-xs';
+      ansEditBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+      ansEditBtn.appendChild(mkIcon(IC.edit, 11)); ansEditBtn.appendChild(document.createTextNode(' Edit'));
+      var ansDoneBtn = document.createElement('button'); ansDoneBtn.type = 'button'; ansDoneBtn.className = 'btn btn-primary btn-xs';
+      ansDoneBtn.style.cssText = 'display:none;align-items:center;gap:4px;';
+      ansDoneBtn.appendChild(mkIcon(IC.done, 11)); ansDoneBtn.appendChild(document.createTextNode(' Done'));
+      ansEditBtn.addEventListener('click', (function(rd, ta, eb, db) { return function(e) {
+        e.stopPropagation();
+        rd.style.display = 'none'; ta.style.display = 'block'; ta.focus();
+        eb.style.display = 'none'; db.style.display = 'inline-flex';
+      }; })(ansRenderDiv, ansTa, ansEditBtn, ansDoneBtn));
+      ansDoneBtn.addEventListener('click', (function(i, rd, ta, eb, db) { return function(e) {
+        e.stopPropagation();
+        problems[i].expected_answer = ta.value;
+        rd.textContent = ta.value || '(no answer yet — click Edit to add)';
+        if (ta.value) renderMath(rd);
+        rd.style.display = 'block'; ta.style.display = 'none';
+        eb.style.display = 'inline-flex'; db.style.display = 'none';
+      }; })(idx, ansRenderDiv, ansTa, ansEditBtn, ansDoneBtn));
+      ansControls.appendChild(ansEditBtn); ansControls.appendChild(ansDoneBtn);
+      ansBody.appendChild(ansRenderDiv); ansBody.appendChild(ansTa); ansBody.appendChild(ansControls);
+      ansToggle.addEventListener('click', function(e) {
+        e.stopPropagation();
+        e.preventDefault();
+        ansBody.classList.toggle('hidden');
+      });
+      ansWrap.appendChild(ansToggle); ansWrap.appendChild(ansBody);
+      card.appendChild(ansWrap);
+    }
+
     // Image chips
     var chipsRow = document.createElement('div'); chipsRow.className = 'chips-row';
     chipsRow.id = 'chips-' + idx;
@@ -807,13 +1018,31 @@ _HTML = """<!DOCTYPE html>
 
   function updateChips(idx, chipsRow) {
     chipsRow.innerHTML = '';
+    var hasImages = (problems[idx].images || []).length > 0;
+    var diagBadge = document.getElementById('diag-badge-' + idx);
+    if (diagBadge) {
+      if (hasImages) {
+        diagBadge.className = 'badge badge-ready';
+        diagBadge.title = 'Diagram attached';
+        diagBadge.innerHTML = '';
+        diagBadge.appendChild(mkIcon(IC.img, 11));
+        diagBadge.appendChild(document.createTextNode(' diagram attached'));
+      } else {
+        diagBadge.className = 'badge badge-warn';
+        diagBadge.title = 'References a diagram — attach an image to resolve';
+        diagBadge.innerHTML = '';
+        diagBadge.appendChild(mkIcon(IC.warn, 11));
+        var label = problems[idx].figure_reference || 'diagram needed';
+        diagBadge.appendChild(document.createTextNode(' ' + label));
+      }
+    }
     (problems[idx].images || []).forEach(function(img, ii) {
       var chip = document.createElement('div'); chip.className = 'img-chip';
       var thumb = document.createElement('img'); thumb.src = img.data; thumb.title = img.name;
       thumb.addEventListener('click', function() { openImageModal(img.data); });
       var name = document.createElement('span'); name.textContent = img.name || 'image';
       name.style.cssText = 'max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-      var rm = document.createElement('button'); rm.className = 'img-chip-remove'; rm.textContent = '\\u00d7';
+      var rm = document.createElement('button'); rm.className = 'img-chip-remove'; rm.textContent = '✕';
       rm.addEventListener('click', (function(i, imgI, row) {
         return function() { problems[i].images.splice(imgI, 1); updateChips(i, row); };
       })(idx, ii, chipsRow));
@@ -891,6 +1120,57 @@ _HTML = """<!DOCTYPE html>
     setTimeout(function() { t.classList.remove('show'); }, 2500);
   }
 
+  // ── EduVerse save ─────────────────────────────────────────────────────────
+
+  function toggleEvPanel() {
+    var panel = document.getElementById('ev-panel');
+    panel.classList.toggle('open');
+    document.getElementById('ev-status').textContent = '';
+    document.getElementById('ev-status').className = 'ev-status';
+  }
+
+  async function saveToEduverse(btn) {
+    var courseId  = parseInt(document.getElementById('ev-course-id').value, 10);
+    var chapterId = parseInt(document.getElementById('ev-chapter-id').value, 10);
+    var statusEl  = document.getElementById('ev-status');
+
+    if (!courseId || courseId < 1) { statusEl.textContent = 'Enter a valid Course ID.'; statusEl.className = 'ev-status err'; return; }
+    if (!chapterId || chapterId < 1) { statusEl.textContent = 'Enter a valid Chapter ID.'; statusEl.className = 'ev-status err'; return; }
+
+    var toSave = problems.filter(function(q) { return q.exam_ready; });
+    if (!toSave.length) { statusEl.textContent = 'No exam-ready questions to save. Toggle "Exam ready" on questions first.'; statusEl.className = 'ev-status err'; return; }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Saving...';
+    var withImages = toSave.filter(function(q) { return (q.images || []).length > 0; }).length;
+    statusEl.textContent = 'Sending ' + toSave.length + ' questions to EduVerse' + (withImages ? ' (uploading ' + withImages + ' diagram' + (withImages !== 1 ? 's' : '') + ')' : '') + '...';
+    statusEl.className = 'ev-status';
+
+    try {
+      var res = await fetch('/api/save-to-eduverse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ courseId: courseId, chapterId: chapterId, problems: toSave }),
+      });
+      var data = await res.json();
+      if (!res.ok) { throw new Error(data.detail || 'Save failed'); }
+
+      var msg = '✓ Saved ' + data.saved + ' question' + (data.saved !== 1 ? 's' : '') + ' to EduVerse as drafts.';
+      if (data.imagesUploaded > 0) msg += ' ' + data.imagesUploaded + ' diagram' + (data.imagesUploaded !== 1 ? 's' : '') + ' uploaded.';
+      if (data.failed > 0) { msg += ' ' + data.failed + ' failed (see console).'; console.warn('Failed items:', data.failedItems); }
+      statusEl.textContent = msg;
+      statusEl.className = 'ev-status ok';
+      showToast('Saved ' + data.saved + ' questions to EduVerse.');
+      document.getElementById('refresh-warning').style.display = 'none';
+    } catch(e) {
+      statusEl.textContent = 'Error: ' + e.message;
+      statusEl.className = 'ev-status err';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Save exam-ready questions';
+    }
+  }
+
   function downloadRawText() {
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([rawText], { type: 'text/plain' }));
@@ -905,7 +1185,7 @@ _HTML = """<!DOCTYPE html>
 
   function inferChapterFromQuestionNumber(questionNumber) {
     var qn = String(questionNumber || '').trim().toUpperCase();
-    var m = qn.match(/^[A-Z]+(\d+)\./);
+    var m = qn.match(/^[A-Z]+(\\d+)\\./);
     return m ? parseInt(m[1], 10) : null;
   }
 
@@ -1001,17 +1281,82 @@ async def extract(
     return {"text": text, "images": images, "char_count": len(text)}
 
 
+# LaTeX commands that start with b/f/n/r/t after a single "\". JSON treats \b \f \n \r \t as
+# control characters, so "\frac" becomes form feed + "rac" and "\to" becomes tab + "o" unless
+# we double the backslash before json.loads. Longer tokens first so e.g. \rightarrow is not split as \right.
+_LATEX_JSON_COLLISION_TOKENS = sorted(
+    {
+        "boldsymbol",
+        "textbf",
+        "textit",
+        "textsf",
+        "texttt",
+        "textnormal",
+        "text",
+        "tfrac",
+        "theta",
+        "Theta",
+        "triangle",
+        "tilde",
+        "times",
+        "tanh",
+        "tan",
+        "tau",
+        "to",
+        "Rightarrow",
+        "Rrightarrow",
+        "rightarrow",
+        "rightleftharpoons",
+        "right",
+        "rho",
+        "rangle",
+        "rfloor",
+        "mathrm",
+        "mathcal",
+        "mathit",
+        "mathfrak",
+        "mathtt",
+        "mathbf",
+        "binom",
+        "begin",
+        "beta",
+        "biggl",
+        "biggr",
+        "bigl",
+        "bigr",
+        "big",
+        "nabla",
+        "notin",
+        "neq",
+        "nu",
+        "frac",
+        "fbox",
+    },
+    key=len,
+    reverse=True,
+)
+
+
+def _fix_latex_json_escape_collisions(raw: str) -> str:
+    out = raw
+    for tok in _LATEX_JSON_COLLISION_TOKENS:
+        pat = rf"(?<!\\)\\{re.escape(tok)}(?![A-Za-z])"
+        # Callable repl: string repl would interpret `\f` etc. inside the replacement.
+        out = re.sub(pat, lambda m, t=tok: chr(92) * 2 + t, out)
+    return out
+
+
 @app.post("/api/parse-json")
 async def parse_json_route(request: Request):
     raw = (await request.body()).decode("utf-8").strip()
     m = re.search(r"```(?:json)?\n([\s\S]*?)\n?```", raw)
     if m:
         raw = m.group(1).strip()
-    # Fix unescaped LaTeX backslashes like \le, \ge, \alpha that Gemini forgets to escape.
-    # Match every \X pair atomically: if X is a valid JSON escape char, leave it alone;
-    # otherwise double the backslash. This prevents the second \ of \\ from being re-matched.
+    raw = _fix_latex_json_escape_collisions(raw)
+    # Fix remaining unescaped LaTeX backslashes (\alpha, \le, ...) for strict JSON.
+    # (?<![\\]) so we do not treat the second "\" in "\\frac" as starting a new JSON escape.
     fixed = re.sub(
-        r'\\(.)',
+        r'(?<!\\)\\(.)',
         lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else '\\\\' + m.group(1),
         raw,
     )
@@ -1098,7 +1443,7 @@ async def export_chapter(payload: dict):
                 "figure_reference": q.get("figure_reference"),
                 "exam_ready": q.get("exam_ready") is not False,
                 "exam_notes": q.get("exam_notes"),
-                "answer": q.get("answer"),
+                "expected_answer": q.get("expected_answer"),
                 "assets": image_paths,
                 "source": {
                     "teammate": teammate,
@@ -1127,6 +1472,165 @@ async def save(problems: list):
     with open(OUTPUT_DIR / "problems.json", "w", encoding="utf-8") as f:
         json.dump(problems, f, indent=2, ensure_ascii=False)
     return {"ok": True}
+
+
+_BLOOM_MAP = {
+    "remembering": "remembering",
+    "understanding": "understanding",
+    "applying": "applying",
+    "analyzing": "analyzing",
+    "evaluating": "evaluating",
+    "creating": "creating",
+}
+_DIFFICULTY_MAP = {"easy": "easy", "medium": "medium", "hard": "hard"}
+_TYPE_MAP = {"written": "written", "mcq": "mcq", "true_false": "true_false", "essay": "essay"}
+
+
+def _to_backend_question(q: dict, course_id: int, chapter_id: int, question_file_id: int | None = None) -> dict:
+    question_type = _TYPE_MAP.get(str(q.get("question_type", "")).lower(), "written")
+    difficulty    = _DIFFICULTY_MAP.get(str(q.get("difficulty", "")).lower(), "medium")
+    bloom_level   = _BLOOM_MAP.get(str(q.get("bloom_level", "")).lower(), "applying")
+
+    payload: dict = {
+        "courseId":     course_id,
+        "chapterId":    chapter_id,
+        "questionType": question_type,
+        "difficulty":   difficulty,
+        "bloomLevel":   bloom_level,
+        "questionText": str(q.get("question", "") or ""),
+        "status":       "draft",
+    }
+
+    if question_file_id:
+        payload["questionFileId"] = question_file_id
+
+    if question_type in ("written", "essay"):
+        payload["expectedAnswerText"] = str(q.get("expected_answer", "") or "")
+
+    if q.get("hints"):
+        payload["hints"] = str(q["hints"])
+
+    if question_type == "mcq" and q.get("options"):
+        payload["options"] = [
+            {"optionText": str(o.get("optionText", o) if isinstance(o, dict) else o), "isCorrect": bool(o.get("isCorrect", False)) if isinstance(o, dict) else False}
+            for o in q["options"]
+        ]
+    elif question_type == "true_false":
+        payload["options"] = [
+            {"optionText": "True",  "isCorrect": True},
+            {"optionText": "False", "isCorrect": False},
+        ]
+
+    return payload
+
+
+async def _upload_question_image(client: httpx.AsyncClient, token: str, img_b64: str, filename: str) -> int | None:
+    """Upload a base64 image to EduVerse, return fileId or None on failure."""
+    try:
+        header, data = img_b64.split(",", 1)
+        mime = header.split(";")[0].split(":")[1]
+        img_bytes = base64.b64decode(data)
+    except Exception:
+        return None
+
+    async def _do_upload(tok: str):
+        return await client.post(
+            f"{EDUVERSE_API_URL}/api/question-bank/questions/upload-image",
+            headers={"Authorization": f"Bearer {tok}"},
+            files={"image": (filename, img_bytes, mime)},
+        )
+
+    r = await _do_upload(token)
+    if r.status_code == 401:
+        global _eduverse_token
+        _eduverse_token = None
+        token = await _get_eduverse_token()
+        r = await _do_upload(token)
+
+    if not r.is_success:
+        return None
+
+    resp = r.json()
+    file_id = resp.get("fileId") or resp.get("data", {}).get("fileId")
+    return int(file_id) if file_id else None
+
+
+@app.post("/api/save-to-eduverse")
+async def save_to_eduverse(payload: dict):
+    """
+    Bulk-save reviewed problems to the EduVerse question bank.
+    Expects: { courseId, chapterId, problems: [...] }
+    Images (base64 data URLs) in each problem's `images` array are uploaded
+    first; the returned fileId is set as questionFileId on the question.
+    """
+    global _eduverse_token
+
+    course_id  = payload.get("courseId")
+    chapter_id = payload.get("chapterId")
+    problems   = payload.get("problems", [])
+
+    if not isinstance(course_id, int) or course_id < 1:
+        raise HTTPException(status_code=400, detail="courseId must be a positive integer")
+    if not isinstance(chapter_id, int) or chapter_id < 1:
+        raise HTTPException(status_code=400, detail="chapterId must be a positive integer")
+    if not problems:
+        raise HTTPException(status_code=400, detail="No problems provided")
+
+    token = await _get_eduverse_token()
+    images_uploaded = 0
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        # Step 1: upload primary image for each problem that has one
+        question_file_ids: list[int | None] = []
+        for q in problems:
+            imgs = q.get("images") or []
+            if imgs:
+                first = imgs[0]
+                file_id = await _upload_question_image(client, token, first.get("data", ""), first.get("name", "diagram.png"))
+                question_file_ids.append(file_id)
+                if file_id:
+                    images_uploaded += 1
+            else:
+                question_file_ids.append(None)
+
+        # Step 2: batch-create questions with questionFileId already set
+        questions = [
+            _to_backend_question(q, course_id, chapter_id, question_file_ids[i])
+            for i, q in enumerate(problems)
+        ]
+
+        BATCH_SIZE = 50
+        all_created, all_failed = [], []
+
+        for i in range(0, len(questions), BATCH_SIZE):
+            batch = questions[i:i + BATCH_SIZE]
+            r = await client.post(
+                f"{EDUVERSE_API_URL}/api/question-bank/questions/batch",
+                json={"courseId": course_id, "defaultChapterId": chapter_id, "questions": batch},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if r.status_code == 401:
+                _eduverse_token = None
+                token = await _get_eduverse_token()
+                r = await client.post(
+                    f"{EDUVERSE_API_URL}/api/question-bank/questions/batch",
+                    json={"courseId": course_id, "defaultChapterId": chapter_id, "questions": batch},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if not r.is_success:
+                raise HTTPException(status_code=502, detail=f"EduVerse batch failed: {r.text}")
+            data = r.json()
+            all_created.extend(data.get("created", []))
+            all_failed.extend(
+                [{"rowIndex": f["rowIndex"] + i, **{k: v for k, v in f.items() if k != "rowIndex"}} for f in data.get("failed", [])]
+            )
+
+    return {
+        "saved":          len(all_created),
+        "failed":         len(all_failed),
+        "failedItems":    all_failed,
+        "imagesUploaded": images_uploaded,
+    }
 
 
 @app.get("/output/{filename}")

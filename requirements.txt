@@ -3,3 +3,5 @@ uvicorn[standard]
 pymupdf
 pydantic
 python-multipart
+httpx
+python-dotenv
