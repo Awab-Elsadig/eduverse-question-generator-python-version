@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html
 import io
 import json
 import os
@@ -86,6 +87,7 @@ Return a JSON array where each object has exactly these fields:
 - "exam_ready": boolean — true if suitable for a university exam. Mark false for: pure discussion/describe questions, problems entirely dependent on a figure students won't have, or questions too open-ended to grade objectively.
 - "exam_notes": string or null — if exam_ready is false, a brief reason (e.g. "discussion only", "requires Figure P1.2", "open-ended design"). If exam_ready is true, use null.
 - "expected_answer": string or null — for "written" and "true_false" question types only: a concise model answer (1–4 sentences or key steps). For "mcq" use null (the correct option already encodes the answer).
+- "hints": string or null — a short hint (1–2 sentences) that nudges a student toward the solution without giving it away. Provide for all question types. Use null if no meaningful hint can be given.
 
 Return ONLY a valid JSON array wrapped in ```json fences. No explanation.
 
@@ -101,8 +103,19 @@ _HTML = """<!DOCTYPE html>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="onKatexReady()"></script>
+    onload="window.onKatexReady && window.onKatexReady()"></script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>
+    // Auto-reload when the dev server restarts (polls /health every 15s)
+    (function() {
+      var dead = false;
+      setInterval(function() {
+        fetch('/health', { cache: 'no-store' }).then(function() {
+          if (dead) location.reload();
+        }).catch(function() { dead = true; });
+      }, 15000);
+    })();
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.5; }
@@ -186,13 +199,20 @@ _HTML = """<!DOCTYPE html>
     .q-text { width: 100%; min-height: 80px; resize: vertical; font-size: 0.82rem; line-height: 1.6; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-family: inherit; color: #1e293b; background: #fafafa; display: none; }
     .q-text:focus { outline: none; border-color: #2563eb; background: white; }
     .q-controls { display: flex; align-items: center; gap: 7px; margin-top: 8px; flex-wrap: wrap; }
-    .exam-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 0.73rem; color: #64748b; cursor: pointer; user-select: none; margin-left: auto; }
+    .q-controls-right { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+    .exam-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 0.73rem; color: #64748b; cursor: pointer; user-select: none; }
     .exam-toggle input[type=checkbox] { cursor: pointer; }
     .q-notes { font-size: 0.71rem; color: #94a3b8; margin-top: 5px; font-style: italic; }
-    .q-answer-wrap { margin-top: 8px; }
-    .q-answer-body { margin-top: 4px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
-    .q-answer-body.hidden { display: none; }
-    .ans-rendered { font-size: 0.875rem; line-height: 1.9; min-height: 2em; overflow-x: auto; }
+    .q-field-wrap { margin-top: 12px; border-top: 2px solid #e2e8f0; padding-top: 10px; }
+    body.dark .q-field-wrap { border-top-color: #334155; }
+    .q-field-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .q-field-label { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; }
+    .q-field-ta { width: 100%; resize: vertical; font-size: 0.82rem; line-height: 1.6; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-family: inherit; color: #1e293b; background: #fafafa; display: none; margin-top: 4px; }
+    .q-field-ta:focus { outline: none; border-color: #2563eb; background: white; }
+    .q-field-rendered { font-size: 0.875rem; line-height: 1.8; padding: 2px 0; overflow-x: auto; }
+    .q-field-rendered:empty::before { content: '—'; color: #94a3b8; font-style: italic; font-size: 0.8rem; }
+    body.dark .q-field-ta { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+    body.dark .q-field-ta:focus { background: #0f172a; }
     .chips-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .img-chip { display: inline-flex; align-items: center; gap: 5px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 3px 8px 3px 3px; font-size: 0.72rem; color: #475569; }
     .img-chip img { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; cursor: zoom-in; border: 1px solid #cbd5e1; }
@@ -267,7 +287,6 @@ _HTML = """<!DOCTYPE html>
     body.dark .q-text { background: #0f172a; border-color: #334155; color: #e2e8f0; }
     body.dark .q-text:focus { background: #0f172a; }
     body.dark .q-answer-body { background: #0f172a; border-color: #334155; }
-    body.dark .ans-rendered { color: #e2e8f0; }
     body.dark .q-notes { color: #475569; }
     body.dark .exam-toggle { color: #64748b; }
     body.dark .img-chip { background: #0f172a; border-color: #334155; color: #94a3b8; }
@@ -286,10 +305,18 @@ _HTML = """<!DOCTYPE html>
 <div class="container">
   <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:3px;">
     <h1>Problem Extractor</h1>
+    <div style="display:flex;gap:8px;align-items:center;">
+    <a href="/latest-questions?courseId=30&chapterId=15&limit=100" target="_blank"
+       class="btn btn-secondary" style="text-decoration:none;font-size:0.78rem;padding:6px 12px;"
+       title="Inspect latest saved questions in EduVerse">
+      <i data-lucide="database" style="width:13px;height:13px;"></i>
+      Latest saved
+    </a>
     <button class="dm-toggle" id="dm-toggle-btn" onclick="toggleDark()" title="Toggle dark mode" aria-label="Toggle dark mode">
       <svg id="dm-icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       <svg id="dm-icon-sun"  width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
     </button>
+    </div>
   </div>
   <p class="subtitle">Extract text &rarr; Gemini structures problems &rarr; review &amp; export.</p>
 
@@ -507,12 +534,12 @@ _HTML = """<!DOCTYPE html>
 
   // ── KaTeX ─────────────────────────────────────────────────────────────────
 
-  function onKatexReady() {
+  window.onKatexReady = function onKatexReady() {
     katexReady = true;
-    document.querySelectorAll('.q-rendered').forEach(function(el) {
+    document.querySelectorAll('.q-rendered, .q-field-rendered').forEach(function(el) {
       renderMathInElement(el, KATEX_OPTS);
     });
-  }
+  };
 
   function renderMath(el) {
     if (katexReady && window.renderMathInElement) {
@@ -684,6 +711,7 @@ _HTML = """<!DOCTYPE html>
           exam_ready:       q.exam_ready !== false,
           exam_notes:       q.exam_notes || null,
           expected_answer:  q.expected_answer || null,
+          hints:            q.hints || null,
           images:           [],
         };
       });
@@ -889,10 +917,11 @@ _HTML = """<!DOCTYPE html>
 
     // Controls
     var controls = document.createElement('div'); controls.className = 'q-controls';
+    var ctrlRight = document.createElement('div'); ctrlRight.className = 'q-controls-right';
 
-    var editBtn = document.createElement('button'); editBtn.className = 'btn btn-secondary btn-xs'; editBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+    var editBtn = document.createElement('button'); editBtn.className = 'btn btn-secondary btn-xs'; editBtn.type = 'button'; editBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
     editBtn.appendChild(mkIcon(IC.edit, 11)); editBtn.appendChild(document.createTextNode(' Edit'));
-    var doneBtn = document.createElement('button'); doneBtn.className = 'btn btn-primary btn-xs'; doneBtn.style.display = 'none'; doneBtn.style.cssText = 'display:none;align-items:center;gap:4px;';
+    var doneBtn = document.createElement('button'); doneBtn.className = 'btn btn-primary btn-xs'; doneBtn.type = 'button'; doneBtn.style.cssText = 'display:none;align-items:center;gap:4px;';
     doneBtn.appendChild(mkIcon(IC.done, 11)); doneBtn.appendChild(document.createTextNode(' Done'));
     editBtn.addEventListener('click', function(e) {
       e.stopPropagation(); renderDiv.style.display = 'none'; ta.style.display = 'block'; ta.focus();
@@ -906,7 +935,6 @@ _HTML = """<!DOCTYPE html>
         editBtn.style.display = 'inline-flex'; doneBtn.style.display = 'none';
       };
     })(idx));
-    controls.appendChild(editBtn); controls.appendChild(doneBtn);
 
     // Attach diagram
     var fi = document.createElement('input'); fi.type = 'file'; fi.accept = 'image/*'; fi.style.display = 'none';
@@ -923,10 +951,12 @@ _HTML = """<!DOCTYPE html>
       };
     })(idx));
     card.appendChild(fi);
-    var attachBtn = document.createElement('button'); attachBtn.className = 'btn btn-secondary btn-xs'; attachBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+    var attachBtn = document.createElement('button'); attachBtn.className = 'btn btn-secondary btn-xs'; attachBtn.type = 'button'; attachBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
     attachBtn.appendChild(mkIcon(IC.img, 11)); attachBtn.appendChild(document.createTextNode(' Attach diagram'));
     attachBtn.addEventListener('click', function(e) { e.stopPropagation(); fi.click(); });
-    controls.appendChild(attachBtn);
+
+    ctrlRight.appendChild(editBtn); ctrlRight.appendChild(doneBtn); ctrlRight.appendChild(attachBtn);
+    controls.appendChild(ctrlRight);
 
     // Exam ready toggle
     var examLabel = document.createElement('label'); examLabel.className = 'exam-toggle';
@@ -948,7 +978,7 @@ _HTML = """<!DOCTYPE html>
     })(idx, card));
     var examLbl = document.createElement('span'); examLbl.textContent = 'Exam ready';
     examLabel.appendChild(examCb); examLabel.appendChild(examLbl);
-    controls.appendChild(examLabel);
+    ctrlRight.insertBefore(examLabel, editBtn);
     card.appendChild(controls);
 
     // Notes
@@ -957,56 +987,48 @@ _HTML = """<!DOCTYPE html>
       notes.textContent = 'Note: ' + q.exam_notes; card.appendChild(notes);
     }
 
+    // Helper: build a render+edit field section (same pattern as the question field)
+    function makeField(labelIcon, labelText, initialValue, rows, onSave) {
+      var wrap = document.createElement('div'); wrap.className = 'q-field-wrap';
+      var hdr = document.createElement('div'); hdr.className = 'q-field-header';
+      var lbl = document.createElement('div'); lbl.className = 'q-field-label';
+      lbl.appendChild(mkIcon(labelIcon, 11)); lbl.appendChild(document.createTextNode(' ' + labelText));
+      var fEditBtn = document.createElement('button'); fEditBtn.className = 'btn btn-secondary btn-xs'; fEditBtn.type = 'button';
+      fEditBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+      fEditBtn.appendChild(mkIcon(IC.edit, 11)); fEditBtn.appendChild(document.createTextNode(' Edit'));
+      var fDoneBtn = document.createElement('button'); fDoneBtn.className = 'btn btn-primary btn-xs'; fDoneBtn.type = 'button';
+      fDoneBtn.style.cssText = 'display:none;align-items:center;gap:4px;';
+      fDoneBtn.appendChild(mkIcon(IC.done, 11)); fDoneBtn.appendChild(document.createTextNode(' Done'));
+      hdr.appendChild(lbl); hdr.appendChild(fEditBtn); hdr.appendChild(fDoneBtn);
+      var rd = document.createElement('div'); rd.className = 'q-field-rendered';
+      rd.textContent = initialValue || ''; renderMath(rd);
+      var ta = document.createElement('textarea'); ta.className = 'q-field-ta';
+      ta.rows = rows; ta.value = initialValue || '';
+      fEditBtn.addEventListener('click', function(e) {
+        e.stopPropagation(); rd.style.display = 'none'; ta.style.display = 'block'; ta.focus();
+        fEditBtn.style.display = 'none'; fDoneBtn.style.display = 'inline-flex';
+      });
+      fDoneBtn.addEventListener('click', function(e) {
+        e.stopPropagation(); onSave(ta.value);
+        rd.textContent = ta.value; renderMath(rd);
+        rd.style.display = ''; ta.style.display = 'none';
+        fEditBtn.style.display = 'inline-flex'; fDoneBtn.style.display = 'none';
+      });
+      wrap.appendChild(hdr); wrap.appendChild(rd); wrap.appendChild(ta);
+      return wrap;
+    }
+
     // Model answer (written / true_false only)
     if (q.question_type === 'written' || q.question_type === 'true_false') {
-      var ansWrap = document.createElement('div'); ansWrap.className = 'q-answer-wrap';
-      var ansToggle = document.createElement('button'); ansToggle.type = 'button'; ansToggle.className = 'btn btn-secondary btn-xs ans-toggle';
-      ansToggle.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-bottom:4px;';
-      ansToggle.appendChild(mkIcon(IC.done, 11)); ansToggle.appendChild(document.createTextNode(' Model answer'));
-      var ansBody = document.createElement('div'); ansBody.className = 'q-answer-body hidden';
-      // Rendered view (mirrors q-rendered)
-      var ansRenderDiv = document.createElement('div'); ansRenderDiv.className = 'q-rendered ans-rendered';
-      ansRenderDiv.style.cssText = 'min-height:2em;cursor:text;';
-      ansRenderDiv.textContent = q.expected_answer || '(no answer yet — click Edit to add)';
-      if (q.expected_answer) renderMath(ansRenderDiv);
-      // Edit textarea (mirrors q-text but always visible when shown)
-      var ansTa = document.createElement('textarea'); ansTa.className = 'q-text ans-ta';
-      ansTa.rows = 3; ansTa.style.display = 'none';
-      ansTa.placeholder = 'Enter expected answer…';
-      ansTa.value = q.expected_answer || '';
-      ansTa.addEventListener('change', (function(i) { return function(e) { problems[i].expected_answer = e.target.value; }; })(idx));
-      ansTa.addEventListener('input',  (function(i) { return function(e) { problems[i].expected_answer = e.target.value; }; })(idx));
-      // Edit / Done controls
-      var ansControls = document.createElement('div'); ansControls.style.cssText = 'display:flex;gap:6px;margin-top:6px;';
-      var ansEditBtn = document.createElement('button'); ansEditBtn.type = 'button'; ansEditBtn.className = 'btn btn-secondary btn-xs';
-      ansEditBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
-      ansEditBtn.appendChild(mkIcon(IC.edit, 11)); ansEditBtn.appendChild(document.createTextNode(' Edit'));
-      var ansDoneBtn = document.createElement('button'); ansDoneBtn.type = 'button'; ansDoneBtn.className = 'btn btn-primary btn-xs';
-      ansDoneBtn.style.cssText = 'display:none;align-items:center;gap:4px;';
-      ansDoneBtn.appendChild(mkIcon(IC.done, 11)); ansDoneBtn.appendChild(document.createTextNode(' Done'));
-      ansEditBtn.addEventListener('click', (function(rd, ta, eb, db) { return function(e) {
-        e.stopPropagation();
-        rd.style.display = 'none'; ta.style.display = 'block'; ta.focus();
-        eb.style.display = 'none'; db.style.display = 'inline-flex';
-      }; })(ansRenderDiv, ansTa, ansEditBtn, ansDoneBtn));
-      ansDoneBtn.addEventListener('click', (function(i, rd, ta, eb, db) { return function(e) {
-        e.stopPropagation();
-        problems[i].expected_answer = ta.value;
-        rd.textContent = ta.value || '(no answer yet — click Edit to add)';
-        if (ta.value) renderMath(rd);
-        rd.style.display = 'block'; ta.style.display = 'none';
-        eb.style.display = 'inline-flex'; db.style.display = 'none';
-      }; })(idx, ansRenderDiv, ansTa, ansEditBtn, ansDoneBtn));
-      ansControls.appendChild(ansEditBtn); ansControls.appendChild(ansDoneBtn);
-      ansBody.appendChild(ansRenderDiv); ansBody.appendChild(ansTa); ansBody.appendChild(ansControls);
-      ansToggle.addEventListener('click', function(e) {
-        e.stopPropagation();
-        e.preventDefault();
-        ansBody.classList.toggle('hidden');
-      });
-      ansWrap.appendChild(ansToggle); ansWrap.appendChild(ansBody);
-      card.appendChild(ansWrap);
+      card.appendChild(makeField(IC.done, 'Model answer', q.expected_answer, 3, (function(i) {
+        return function(v) { problems[i].expected_answer = v; };
+      })(idx)));
     }
+
+    // Hint (all question types)
+    card.appendChild(makeField(IC.warn, 'Hint', q.hints, 2, (function(i) {
+      return function(v) { problems[i].hints = v; };
+    })(idx)));
 
     // Image chips
     var chipsRow = document.createElement('div'); chipsRow.className = 'chips-row';
@@ -1240,6 +1262,10 @@ _HTML = """<!DOCTYPE html>
 
 HTML = _HTML.replace("__PROMPT__", json.dumps(GEMINI_PROMPT))
 
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -1641,6 +1667,207 @@ def serve_output(filename: str):
     return FileResponse(path)
 
 
+@app.get("/latest-questions", response_class=HTMLResponse)
+async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, limit: int = 100):
+    """Inspector page: latest questions saved to EduVerse for a given course/chapter,
+    with attached Supabase images and exact-text duplicate detection."""
+    from collections import defaultdict
+    from datetime import datetime as _dt, timezone as _tz
+
+    if limit < 1 or limit > 500:
+        limit = 100
+
+    PAGE_SIZE = 100
+    MAX_PAGES = 20
+
+    questions: list[dict] = []
+    total = 0
+    token = await _get_eduverse_token()
+
+    async with httpx.AsyncClient() as client:
+        for page in range(1, MAX_PAGES + 1):
+            params: dict = {"courseId": courseId, "page": page, "limit": PAGE_SIZE}
+            if chapterId is not None:
+                params["chapterId"] = chapterId
+            r = await client.get(
+                f"{EDUVERSE_API_URL}/api/question-bank/questions",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            if r.status_code == 401:
+                global _eduverse_token
+                _eduverse_token = None
+                token = await _get_eduverse_token()
+                r = await client.get(
+                    f"{EDUVERSE_API_URL}/api/question-bank/questions",
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=30,
+                )
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"List failed page={page}: {r.text}")
+            body = r.json()
+            if isinstance(body, dict):
+                items = body.get("data") or body.get("items") or body.get("questions") or []
+                if page == 1:
+                    total = int(body.get("total") or len(items))
+            elif isinstance(body, list):
+                items = body
+                if page == 1:
+                    total = len(items)
+            else:
+                items = []
+            if not items:
+                break
+            questions.extend(items)
+            if len(questions) >= limit or len(items) < PAGE_SIZE:
+                break
+
+    questions.sort(
+        key=lambda q: (q.get("createdAt") or "", q.get("id") or 0),
+        reverse=True,
+    )
+    questions = questions[:limit]
+
+    dup_groups: dict[str, list[dict]] = defaultdict(list)
+    for q in questions:
+        text = (q.get("questionText") or "").strip().lower()
+        if text:
+            dup_groups[text].append(q)
+    dups = {k: v for k, v in dup_groups.items() if len(v) > 1}
+
+    def fmt_date(s):
+        if not s:
+            return "—"
+        try:
+            iso = s[:-1] + "+00:00" if isinstance(s, str) and s.endswith("Z") else s
+            d = _dt.fromisoformat(iso) if isinstance(iso, str) else iso
+            return d.strftime("%Y-%m-%d %I:%M %p")
+        except Exception:
+            return str(s)
+
+    def trunc(s, n=240):
+        s = s or ""
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    def img_tag(q):
+        url = q.get("questionImageUrl")
+        if not url:
+            return '<span class="muted">—</span>'
+        return f'<a href="{html.escape(url)}" target="_blank"><img src="{html.escape(url)}" alt="figure"></a>'
+
+    def meta_line(q):
+        return (
+            f"id={q.get('id')} · "
+            f"saved {fmt_date(q.get('createdAt'))} · "
+            f"chapter={q.get('chapterId')} · "
+            f"type={html.escape(str(q.get('questionType', '')))} · "
+            f"hasImage={'yes' if q.get('questionFileId') else 'no'}"
+        )
+
+    dup_html = ""
+    if dups:
+        parts = []
+        for text, items in sorted(dups.items(), key=lambda kv: -len(kv[1])):
+            sample = items[0].get("questionText") or ""
+            rows = "".join(f"<li><code>{meta_line(q)}</code></li>" for q in items)
+            parts.append(
+                f'<div class="card dup">'
+                f'<div class="dup-count">{len(items)} copies</div>'
+                f'<div class="qtext">{html.escape(sample)}</div>'
+                f'<ul>{rows}</ul></div>'
+            )
+        dup_html = "".join(parts)
+    else:
+        dup_html = '<p class="muted">No exact duplicates found.</p>'
+
+    rows_html = "".join(
+        f"<tr>"
+        f"<td>{q.get('id')}</td>"
+        f"<td>{html.escape(fmt_date(q.get('createdAt')))}</td>"
+        f"<td>{q.get('chapterId')}</td>"
+        f"<td>{html.escape(str(q.get('questionType', '')))}</td>"
+        f"<td>{html.escape(str(q.get('difficulty', '') or ''))}</td>"
+        f"<td>{html.escape(str(q.get('bloomLevel', '') or ''))}</td>"
+        f"<td>{html.escape(str(q.get('status', '') or ''))}</td>"
+        f"<td class='img-cell'>{img_tag(q)}</td>"
+        f"<td>{'yes' if (q.get('expectedAnswerText') or '').strip() else 'no'}</td>"
+        f"<td title=\"{html.escape(q.get('questionText') or '')}\">{html.escape(trunc(q.get('questionText') or ''))}</td>"
+        f"</tr>"
+        for q in questions
+    )
+
+    chapter_label = f"chapter {chapterId}" if chapterId is not None else "all chapters"
+    empty = "" if questions else f'<p class="muted">No questions found for course {courseId} ({chapter_label}).</p>'
+    generated = _dt.now(_tz.utc).strftime("%Y-%m-%d %I:%M %p UTC")
+
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Latest Questions — course {courseId}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {{ delimiters: [
+    {{left: '$$', right: '$$', display: true}},
+    {{left: '$',  right: '$',  display: false}}
+  ]}});"></script>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 1300px; margin: 24px auto; padding: 0 16px; color: #1b1b1b; }}
+  h1 {{ font-size: 22px; margin-bottom: 4px; }}
+  h2 {{ margin-top: 32px; border-bottom: 1px solid #e5e5e5; padding-bottom: 4px; }}
+  form.filters {{ margin: 12px 0; padding: 10px 14px; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }}
+  form.filters label {{ display: flex; flex-direction: column; font-size: 12px; color: #555; }}
+  form.filters input {{ padding: 4px 8px; font-size: 14px; width: 110px; }}
+  form.filters button {{ padding: 6px 14px; font-size: 14px; background: #0969da; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }}
+  .summary {{ background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 16px; }}
+  .summary span {{ display: inline-block; margin-right: 18px; }}
+  .summary b {{ font-size: 18px; }}
+  .muted {{ color: #6a737d; }}
+  .card {{ border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 14px; margin: 10px 0; background: #fff; }}
+  .dup {{ border-left: 4px solid #d73a49; }}
+  .dup-count {{ font-weight: bold; color: #d73a49; margin-bottom: 6px; }}
+  .qtext {{ white-space: pre-wrap; margin-bottom: 8px; }}
+  ul {{ margin: 4px 0 0 0; padding-left: 18px; }}
+  code {{ font-size: 12px; color: #444; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; vertical-align: top; }}
+  th {{ background: #f6f8fa; position: sticky; top: 0; }}
+  td:last-child {{ max-width: 540px; }}
+  .img-cell img {{ max-width: 140px; max-height: 100px; border: 1px solid #ddd; border-radius: 3px; display: block; }}
+  .note {{ color: #6a737d; font-size: 12px; margin-top: 4px; }}
+</style>
+</head><body>
+  <h1>Latest Questions — course {courseId} ({chapter_label})</h1>
+  <div class="note">Sorted by createdAt DESC (falls back to id DESC if backend hasn't been redeployed with the createdAt field). Image URLs are Supabase signed URLs (1-hour TTL) — refresh the page if they stop loading.</div>
+  <form class="filters" method="get" action="/latest-questions">
+    <label>Course ID<input type="number" name="courseId" value="{courseId}" required></label>
+    <label>Chapter ID (optional)<input type="number" name="chapterId" value="{chapterId if chapterId is not None else ''}"></label>
+    <label>Limit<input type="number" name="limit" value="{limit}" min="1" max="500"></label>
+    <button type="submit">Refresh</button>
+  </form>
+  <div class="summary">
+    <span>Showing: <b>{len(questions)}</b> of <b>{total}</b></span>
+    <span>Duplicate groups: <b>{len(dups)}</b></span>
+    <span>Duplicate rows: <b>{sum(len(v) for v in dups.values())}</b></span>
+    <span>Generated: <b>{generated}</b></span>
+  </div>
+  {empty}
+
+  <h2>Duplicates (exact text, case-insensitive)</h2>
+  {dup_html}
+
+  <h2>Latest questions</h2>
+  <table>
+    <thead><tr>
+      <th>id</th><th>saved</th><th>ch</th><th>type</th><th>diff</th><th>bloom</th><th>status</th><th>image</th><th>answer</th><th>text</th>
+    </tr></thead>
+    <tbody>{rows_html}</tbody>
+  </table>
+</body></html>"""
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8001)), reload=True)

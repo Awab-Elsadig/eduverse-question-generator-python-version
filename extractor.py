@@ -6,6 +6,25 @@ from typing import Any, Dict, List, Tuple
 IMAGE_MIN_WIDTH = 80
 IMAGE_MIN_HEIGHT = 80
 
+def _ocr_page(page) -> str:
+    """Render page to image and run Tesseract OCR. Falls back to empty string if unavailable."""
+    try:
+        import pytesseract
+        from PIL import Image
+        import io
+        import sys
+        if sys.platform == "win32":
+            import os
+            default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            if os.path.exists(default):
+                pytesseract.pytesseract.tesseract_cmd = default
+        mat = fitz.Matrix(2.0, 2.0)  # 2x zoom → ~144 dpi, good OCR accuracy
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        return pytesseract.image_to_string(img, config="--psm 3")
+    except Exception:
+        return ""
+
 
 def clean_text(text: str) -> str:
     replacements = {
@@ -44,6 +63,8 @@ def extract_page_range(
         page_num = page_idx + 1
 
         text = clean_text(page.get_text("text", sort=True))
+        if not text.strip():
+            text = clean_text(_ocr_page(page))
         full_text += f"\n\n--- PAGE {page_num} ---\n{text}"
 
         for img_idx, img_info in enumerate(page.get_images(full=True)):
