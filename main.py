@@ -1730,12 +1730,50 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     )
     questions = questions[:limit]
 
+    # Fetch the logged-in user's profile to resolve their name
+    known_users: dict[int, str] = {}
+    try:
+        async with httpx.AsyncClient() as _mc:
+            _mr = await _mc.get(
+                f"{EDUVERSE_API_URL}/api/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if _mr.status_code == 200:
+                _md = _mr.json()
+                _uid = int(_md.get("userId") or 0)
+                _name = f"{_md.get('firstName', '')} {_md.get('lastName', '')}".strip()
+                if _uid and _name:
+                    known_users[_uid] = _name
+    except Exception:
+        pass
+
+    # Duplicate detection
     dup_groups: dict[str, list[dict]] = defaultdict(list)
     for q in questions:
         text = (q.get("questionText") or "").strip().lower()
         if text:
             dup_groups[text].append(q)
     dups = {k: v for k, v in dup_groups.items() if len(v) > 1}
+    dup_ids: set[int] = {q.get("id") for items in dups.values() for q in items}
+
+    # Group by save-minute (YYYY-MM-DD HH:MM) + createdBy
+    def minute_key(q):
+        raw = q.get("createdAt") or ""
+        if not raw:
+            return ("~no-date", q.get("createdBy") or 0)
+        try:
+            iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            d = _dt.fromisoformat(iso)
+            return (d.strftime("%Y-%m-%d %H:%M"), q.get("createdBy") or 0)
+        except Exception:
+            return ("~no-date", q.get("createdBy") or 0)
+
+    batches: dict[tuple, list[dict]] = defaultdict(list)
+    for q in questions:
+        batches[minute_key(q)].append(q)
+    # Sort batches newest first
+    sorted_batches = sorted(batches.items(), key=lambda kv: kv[0][0], reverse=True)
 
     def fmt_date(s):
         if not s:
@@ -1747,6 +1785,16 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
         except Exception:
             return str(s)
 
+    def fmt_minute(key):
+        ts, _ = key
+        if ts == "~no-date":
+            return "Unknown time"
+        try:
+            d = _dt.strptime(ts, "%Y-%m-%d %H:%M")
+            return d.strftime("%Y-%m-%d %I:%M %p") + " UTC"
+        except Exception:
+            return ts
+
     def trunc(s, n=240):
         s = s or ""
         return s if len(s) <= n else s[: n - 1] + "…"
@@ -1755,48 +1803,93 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
         url = q.get("questionImageUrl")
         if not url:
             return '<span class="muted">—</span>'
-        return f'<a href="{html.escape(url)}" target="_blank"><img src="{html.escape(url)}" alt="figure"></a>'
+        esc = html.escape(url)
+        return f'<img src="{esc}" alt="figure" onclick="openModal(\'{esc}\')">'
 
-    def meta_line(q):
-        return (
-            f"id={q.get('id')} · "
-            f"saved {fmt_date(q.get('createdAt'))} · "
-            f"chapter={q.get('chapterId')} · "
-            f"type={html.escape(str(q.get('questionType', '')))} · "
-            f"hasImage={'yes' if q.get('questionFileId') else 'no'}"
+    def type_badge(v):
+        v = str(v or "")
+        return f'<span class="badge badge-blue">{html.escape(v)}</span>' if v else '<span class="muted">—</span>'
+
+    def diff_badge(v):
+        v = str(v or "")
+        c = {"easy": "badge-green", "medium": "badge-blue", "hard": "badge-red"}.get(v.lower(), "badge-gray")
+        return f'<span class="badge {c}">{html.escape(v)}</span>' if v else '<span class="muted">—</span>'
+
+    def status_badge(v):
+        v = str(v or "")
+        c = {"approved": "badge-green", "draft": "badge-gray", "rejected": "badge-red"}.get(v.lower(), "badge-gray")
+        return f'<span class="badge {c}">{html.escape(v)}</span>' if v else '<span class="muted">—</span>'
+
+    def user_label(uid):
+        uid = int(uid) if uid else 0
+        name = known_users.get(uid)
+        if name:
+            return f'<span class="badge badge-blue">{html.escape(name)}</span>'
+        return f'<span class="badge badge-gray">User #{uid}</span>' if uid else '<span class="muted">—</span>'
+
+    # Build batch HTML
+    batches_html_parts = []
+    for key, qs in sorted_batches:
+        _, by_id = key
+        q_rows = "".join(
+            f"<tr{'  class=\"dup-row\"' if q.get('id') in dup_ids else ''}>"
+            f"<td><span class='badge badge-gray'>{q.get('id')}</span>{'<span class=\"dup-marker\" title=\"Duplicate\">⚠</span>' if q.get('id') in dup_ids else ''}</td>"
+            f"<td>{type_badge(q.get('questionType'))}</td>"
+            f"<td>{diff_badge(q.get('difficulty'))}</td>"
+            f"<td><span class='badge badge-gray'>{html.escape(str(q.get('bloomLevel','') or ''))}</span></td>"
+            f"<td>{status_badge(q.get('status'))}</td>"
+            f"<td class='img-cell'>{img_tag(q)}</td>"
+            f"<td>{'<span class=\"badge badge-green\">yes</span>' if (q.get('expectedAnswerText') or '').strip() else '<span class=\"badge badge-gray\">no</span>'}</td>"
+            f"<td class='text-cell' title=\"{html.escape(q.get('questionText') or '')}\">{html.escape(trunc(q.get('questionText') or ''))}</td>"
+            f"</tr>"
+            for q in qs
         )
+        has_dups = any(q.get("id") in dup_ids for q in qs)
+        dup_warn = ' <span class="badge badge-red" style="font-size:0.65rem;">has duplicates</span>' if has_dups else ""
+        batches_html_parts.append(f"""
+        <div class="batch-block">
+          <div class="batch-header">
+            <div class="batch-meta">
+              <i data-lucide="clock" style="width:13px;height:13px;flex-shrink:0;"></i>
+              <span class="batch-time">{html.escape(fmt_minute(key))}</span>
+              <span class="batch-sep">&mdash;</span>
+              <i data-lucide="user" style="width:13px;height:13px;flex-shrink:0;"></i>
+              {user_label(by_id)}
+              <span class="batch-sep">&mdash;</span>
+              <span class="badge badge-gray">{len(qs)} question{'s' if len(qs) != 1 else ''}</span>
+              {dup_warn}
+            </div>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr>
+                <th>ID</th><th>Type</th><th>Difficulty</th><th>Bloom</th><th>Status</th><th>Image</th><th>Answer</th><th>Question text</th>
+              </tr></thead>
+              <tbody>{q_rows}</tbody>
+            </table>
+          </div>
+        </div>""")
+    batches_html = "".join(batches_html_parts)
 
+    # Duplicate cards
     dup_html = ""
     if dups:
         parts = []
         for text, items in sorted(dups.items(), key=lambda kv: -len(kv[1])):
             sample = items[0].get("questionText") or ""
-            rows = "".join(f"<li><code>{meta_line(q)}</code></li>" for q in items)
+            rows = "".join(
+                f'<li>id={q.get("id")} · {html.escape(fmt_date(q.get("createdAt")))} · {html.escape(str(q.get("questionType","")))} · ch={q.get("chapterId")}</li>'
+                for q in items
+            )
             parts.append(
-                f'<div class="card dup">'
-                f'<div class="dup-count">{len(items)} copies</div>'
+                f'<div class="card dup-card">'
+                f'<div class="dup-count"><i data-lucide="copy" style="width:11px;height:11px;"></i>&nbsp;{len(items)} copies</div>'
                 f'<div class="qtext">{html.escape(sample)}</div>'
-                f'<ul>{rows}</ul></div>'
+                f'<ul class="meta-list">{rows}</ul></div>'
             )
         dup_html = "".join(parts)
     else:
-        dup_html = '<p class="muted">No exact duplicates found.</p>'
-
-    rows_html = "".join(
-        f"<tr>"
-        f"<td>{q.get('id')}</td>"
-        f"<td>{html.escape(fmt_date(q.get('createdAt')))}</td>"
-        f"<td>{q.get('chapterId')}</td>"
-        f"<td>{html.escape(str(q.get('questionType', '')))}</td>"
-        f"<td>{html.escape(str(q.get('difficulty', '') or ''))}</td>"
-        f"<td>{html.escape(str(q.get('bloomLevel', '') or ''))}</td>"
-        f"<td>{html.escape(str(q.get('status', '') or ''))}</td>"
-        f"<td class='img-cell'>{img_tag(q)}</td>"
-        f"<td>{'yes' if (q.get('expectedAnswerText') or '').strip() else 'no'}</td>"
-        f"<td title=\"{html.escape(q.get('questionText') or '')}\">{html.escape(trunc(q.get('questionText') or ''))}</td>"
-        f"</tr>"
-        for q in questions
-    )
+        dup_html = '<p class="muted" style="padding:4px 0;">No exact duplicates found.</p>'
 
     chapter_label = f"chapter {chapterId}" if chapterId is not None else "all chapters"
     empty = "" if questions else f'<p class="muted">No questions found for course {courseId} ({chapter_label}).</p>'
@@ -1805,66 +1898,215 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Latest Questions — course {courseId}</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
   onload="renderMathInElement(document.body, {{ delimiters: [
     {{left: '$$', right: '$$', display: true}},
     {{left: '$',  right: '$',  display: false}}
   ]}});"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <style>
-  body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 1300px; margin: 24px auto; padding: 0 16px; color: #1b1b1b; }}
-  h1 {{ font-size: 22px; margin-bottom: 4px; }}
-  h2 {{ margin-top: 32px; border-bottom: 1px solid #e5e5e5; padding-bottom: 4px; }}
-  form.filters {{ margin: 12px 0; padding: 10px 14px; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }}
-  form.filters label {{ display: flex; flex-direction: column; font-size: 12px; color: #555; }}
-  form.filters input {{ padding: 4px 8px; font-size: 14px; width: 110px; }}
-  form.filters button {{ padding: 6px 14px; font-size: 14px; background: #0969da; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }}
-  .summary {{ background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 16px; }}
-  .summary span {{ display: inline-block; margin-right: 18px; }}
-  .summary b {{ font-size: 18px; }}
-  .muted {{ color: #6a737d; }}
-  .card {{ border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 14px; margin: 10px 0; background: #fff; }}
-  .dup {{ border-left: 4px solid #d73a49; }}
-  .dup-count {{ font-weight: bold; color: #d73a49; margin-bottom: 6px; }}
-  .qtext {{ white-space: pre-wrap; margin-bottom: 8px; }}
-  ul {{ margin: 4px 0 0 0; padding-left: 18px; }}
-  code {{ font-size: 12px; color: #444; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; vertical-align: top; }}
-  th {{ background: #f6f8fa; position: sticky; top: 0; }}
-  td:last-child {{ max-width: 540px; }}
-  .img-cell img {{ max-width: 140px; max-height: 100px; border: 1px solid #ddd; border-radius: 3px; display: block; }}
-  .note {{ color: #6a737d; font-size: 12px; margin-top: 4px; }}
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.5; }}
+  .container {{ max-width: 1200px; margin: 0 auto; padding: 28px 16px 60px; }}
+  h1 {{ font-size: 1.4rem; font-weight: 700; }}
+  .subtitle {{ color: #64748b; margin: 3px 0 20px; font-size: 0.85rem; }}
+  h2 {{ font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin: 24px 0 10px; }}
+  /* Buttons */
+  .btn {{ padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; font-family: inherit; transition: background 0.12s; display: inline-flex; align-items: center; gap: 6px; }}
+  .btn-primary {{ background: #2563eb; color: white; }}
+  .btn-primary:hover {{ background: #1d4ed8; }}
+  .btn-secondary {{ background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }}
+  .btn-secondary:hover {{ background: #e2e8f0; }}
+  .btn-sm {{ padding: 5px 12px; font-size: 0.78rem; }}
+  /* Card */
+  .card {{ background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; }}
+  /* Dark mode toggle */
+  .dm-toggle {{ display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e2e8f0; background: #f1f5f9; color: #475569; cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s; flex-shrink: 0; }}
+  .dm-toggle:hover {{ background: #e2e8f0; color: #1e293b; }}
+  /* Filter card */
+  .filter-row {{ display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }}
+  .filter-row label {{ display: flex; flex-direction: column; gap: 3px; font-size: 0.72rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }}
+  .filter-row input[type=number] {{ width: 100px; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; font-family: inherit; -moz-appearance: textfield; appearance: textfield; }}
+  .filter-row input[type=number]::-webkit-outer-spin-button,
+  .filter-row input[type=number]::-webkit-inner-spin-button {{ -webkit-appearance: none; margin: 0; }}
+  .filter-row input:focus {{ outline: none; border-color: #2563eb; }}
+  /* Summary strip */
+  .summary-strip {{ display: flex; flex-wrap: wrap; gap: 20px; }}
+  .summary-strip .stat {{ display: flex; flex-direction: column; }}
+  .summary-strip .stat-val {{ font-size: 1.5rem; font-weight: 700; line-height: 1.1; }}
+  .summary-strip .stat-lbl {{ font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }}
+  /* Duplicate card */
+  .dup-card {{ border-left: 3px solid #dc2626; }}
+  .dup-count {{ display: inline-flex; align-items: center; gap: 5px; font-size: 0.72rem; font-weight: 700; color: #dc2626; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }}
+  .qtext {{ font-size: 0.875rem; line-height: 1.7; margin-bottom: 10px; overflow-x: auto; }}
+  .meta-list {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }}
+  .meta-list li {{ font-size: 0.75rem; color: #64748b; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; padding: 4px 8px; font-family: monospace; }}
+  /* Table */
+  .tbl-wrap {{ overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.8rem; }}
+  th {{ background: #f8fafc; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #64748b; padding: 8px 10px; text-align: left; position: sticky; top: 0; border-bottom: 1px solid #e2e8f0; }}
+  td {{ padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; color: #1e293b; }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr:hover td {{ background: #f8fafc; }}
+  td.text-cell {{ max-width: 480px; font-size: 0.8rem; line-height: 1.6; overflow-x: auto; }}
+  .badge {{ padding: 2px 7px; border-radius: 9999px; font-size: 0.65rem; font-weight: 600; white-space: nowrap; }}
+  .badge-blue {{ background: #dbeafe; color: #1d4ed8; }}
+  .badge-green {{ background: #dcfce7; color: #166534; }}
+  .badge-gray {{ background: #f1f5f9; color: #64748b; }}
+  .badge-red {{ background: #fee2e2; color: #dc2626; }}
+  /* Image cell */
+  .img-cell img {{ max-width: 120px; max-height: 90px; border: 1px solid #e2e8f0; border-radius: 5px; display: block; cursor: zoom-in; object-fit: contain; }}
+  /* Batch groups */
+  .batch-block {{ margin-bottom: 16px; }}
+  .batch-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }}
+  .batch-meta {{ display: flex; align-items: center; gap: 7px; font-size: 0.78rem; flex-wrap: wrap; }}
+  .batch-time {{ font-weight: 600; color: #1e293b; }}
+  .batch-sep {{ color: #cbd5e1; }}
+  .dup-row td {{ background: #fff7ed !important; }}
+  .dup-marker {{ color: #f59e0b; font-size: 0.75rem; margin-left: 4px; }}
+  body.dark .batch-time {{ color: #e2e8f0; }}
+  body.dark .batch-sep {{ color: #334155; }}
+  body.dark .dup-row td {{ background: #2d1f0a !important; }}
+  /* Image modal */
+  .img-modal {{ position: fixed; inset: 0; background: rgba(15,23,42,0.8); display: none; align-items: center; justify-content: center; z-index: 300; padding: 18px; }}
+  .img-modal.open {{ display: flex; }}
+  .img-modal img {{ max-width: min(1100px,96vw); max-height: 90vh; border-radius: 8px; box-shadow: 0 16px 40px rgba(15,23,42,0.45); background: white; object-fit: contain; }}
+  .img-modal-close {{ position: absolute; top: 14px; right: 14px; border: 1px solid #94a3b8; background: #0f172a; color: white; border-radius: 6px; font-size: 0.78rem; padding: 6px 10px; cursor: pointer; }}
+  .muted {{ color: #94a3b8; font-size: 0.78rem; }}
+  /* Dark mode */
+  body.dark {{ background: #0f172a; color: #e2e8f0; }}
+  body.dark .card {{ background: #1e293b; border-color: #334155; }}
+  body.dark .btn-secondary {{ background: #1e293b; color: #94a3b8; border-color: #334155; }}
+  body.dark .btn-secondary:hover {{ background: #334155; color: #e2e8f0; }}
+  body.dark .dm-toggle {{ background: #1e293b; border-color: #334155; color: #94a3b8; }}
+  body.dark .dm-toggle:hover {{ background: #334155; color: #e2e8f0; }}
+  body.dark .subtitle {{ color: #64748b; }}
+  body.dark h2 {{ color: #475569; }}
+  body.dark .filter-row label {{ color: #64748b; }}
+  body.dark .filter-row input[type=number] {{ background: #0f172a; border-color: #334155; color: #e2e8f0; }}
+  body.dark .filter-row input:focus {{ border-color: #2563eb; }}
+  body.dark .summary-strip .stat-lbl {{ color: #475569; }}
+  body.dark .dup-card {{ border-left-color: #f87171; }}
+  body.dark .dup-count {{ color: #f87171; }}
+  body.dark .meta-list li {{ background: #0f172a; border-color: #334155; color: #94a3b8; }}
+  body.dark .tbl-wrap {{ border-color: #334155; }}
+  body.dark th {{ background: #1e293b; border-color: #334155; color: #475569; }}
+  body.dark td {{ color: #e2e8f0; border-color: #1e293b; }}
+  body.dark tr:hover td {{ background: #1e293b; }}
+  body.dark .badge-blue {{ background: #1e3a5f; color: #93c5fd; }}
+  body.dark .badge-green {{ background: #14532d; color: #86efac; }}
+  body.dark .badge-gray {{ background: #1e293b; color: #64748b; }}
+  body.dark .badge-red {{ background: #450a0a; color: #f87171; }}
+  body.dark .img-cell img {{ border-color: #334155; }}
+  body.dark .muted {{ color: #475569; }}
 </style>
-</head><body>
-  <h1>Latest Questions — course {courseId} ({chapter_label})</h1>
-  <div class="note">Sorted by createdAt DESC (falls back to id DESC if backend hasn't been redeployed with the createdAt field). Image URLs are Supabase signed URLs (1-hour TTL) — refresh the page if they stop loading.</div>
-  <form class="filters" method="get" action="/latest-questions">
-    <label>Course ID<input type="number" name="courseId" value="{courseId}" required></label>
-    <label>Chapter ID (optional)<input type="number" name="chapterId" value="{chapterId if chapterId is not None else ''}"></label>
-    <label>Limit<input type="number" name="limit" value="{limit}" min="1" max="500"></label>
-    <button type="submit">Refresh</button>
-  </form>
-  <div class="summary">
-    <span>Showing: <b>{len(questions)}</b> of <b>{total}</b></span>
-    <span>Duplicate groups: <b>{len(dups)}</b></span>
-    <span>Duplicate rows: <b>{sum(len(v) for v in dups.values())}</b></span>
-    <span>Generated: <b>{generated}</b></span>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:3px;">
+    <h1>Latest Saved Questions</h1>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <a href="/" class="btn btn-secondary btn-sm" style="text-decoration:none;">
+        <i data-lucide="arrow-left" style="width:13px;height:13px;"></i>
+        Back
+      </a>
+      <button class="dm-toggle" id="dm-toggle-btn" onclick="toggleDark()" title="Toggle dark mode" aria-label="Toggle dark mode">
+        <svg id="dm-icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg id="dm-icon-sun"  width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+    </div>
   </div>
+  <p class="subtitle">Course {courseId} &mdash; {chapter_label} &mdash; latest {len(questions)} of {total} questions &mdash; generated {generated}</p>
+
+  <!-- Filter card -->
+  <div class="card" style="margin-bottom:16px;">
+    <form method="get" action="/latest-questions">
+      <div class="filter-row">
+        <label>Course ID
+          <input type="number" name="courseId" value="{courseId}" required>
+        </label>
+        <label>Chapter ID (optional)
+          <input type="number" name="chapterId" value="{chapterId if chapterId is not None else ''}">
+        </label>
+        <label>Limit
+          <input type="number" name="limit" value="{limit}" min="1" max="500">
+        </label>
+        <button type="submit" class="btn btn-primary btn-sm" style="margin-bottom:1px;">
+          <i data-lucide="refresh-cw" style="width:13px;height:13px;"></i>
+          Refresh
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Summary -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="summary-strip">
+      <div class="stat"><span class="stat-val">{len(questions)}</span><span class="stat-lbl">Showing</span></div>
+      <div class="stat"><span class="stat-val">{total}</span><span class="stat-lbl">Total</span></div>
+      <div class="stat"><span class="stat-val">{len(dups)}</span><span class="stat-lbl">Dup groups</span></div>
+      <div class="stat"><span class="stat-val">{sum(len(v) for v in dups.values())}</span><span class="stat-lbl">Dup rows</span></div>
+    </div>
+  </div>
+
   {empty}
 
-  <h2>Duplicates (exact text, case-insensitive)</h2>
+  <!-- Duplicates -->
+  <h2><i data-lucide="copy" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Duplicates (exact text)</h2>
   {dup_html}
 
-  <h2>Latest questions</h2>
-  <table>
-    <thead><tr>
-      <th>id</th><th>saved</th><th>ch</th><th>type</th><th>diff</th><th>bloom</th><th>status</th><th>image</th><th>answer</th><th>text</th>
-    </tr></thead>
-    <tbody>{rows_html}</tbody>
-  </table>
+  <!-- Batch groups -->
+  <h2><i data-lucide="layers" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Save batches (grouped by minute)</h2>
+  {batches_html}
+
+</div>
+
+<!-- Image zoom modal -->
+<div class="img-modal" id="img-modal" onclick="closeModal()">
+  <button class="img-modal-close" onclick="closeModal()">Close</button>
+  <img id="img-modal-src" src="" alt="figure">
+</div>
+
+<script>
+  // Dark mode — reads same localStorage key as main page
+  function applyDark(dark) {{
+    document.body.classList.toggle('dark', dark);
+    document.getElementById('dm-icon-moon').style.display = dark ? 'none' : '';
+    document.getElementById('dm-icon-sun').style.display  = dark ? '' : 'none';
+  }}
+  function toggleDark() {{
+    var isDark = document.body.classList.contains('dark');
+    applyDark(!isDark);
+    try {{ localStorage.setItem('dm', !isDark ? '1' : '0'); }} catch(e) {{}}
+  }}
+  (function() {{
+    try {{
+      var saved = localStorage.getItem('dm');
+      var prefersDark = saved !== null ? saved === '1' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      applyDark(prefersDark);
+    }} catch(e) {{}}
+  }})();
+
+  // Image zoom
+  function openModal(src) {{
+    document.getElementById('img-modal-src').src = src;
+    document.getElementById('img-modal').classList.add('open');
+  }}
+  function closeModal() {{
+    document.getElementById('img-modal').classList.remove('open');
+    document.getElementById('img-modal-src').src = '';
+  }}
+  document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') closeModal(); }});
+
+  // Lucide icons
+  lucide.createIcons();
+</script>
 </body></html>"""
 
 
