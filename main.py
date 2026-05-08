@@ -1804,52 +1804,70 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     # Build batch HTML
     batches_html_parts = []
     for key, qs in sorted_batches:
-        def _row(q):
+        def _card(q):
             is_dup = q.get("id") in dup_ids
             has_ans = bool((q.get("expectedAnswerText") or "").strip())
             has_hint = bool((q.get("hints") or "").strip())
-            row_cls = "q-row dup-row" if is_dup else "q-row"
-            dup_marker = '<span class="dup-marker" title="Duplicate">⚠</span>' if is_dup else ""
+            card_cls = "q-card dup-card-q" if is_dup else "q-card"
+            dup_marker = '<span class="dup-marker-badge"><i data-lucide="copy" style="width:10px;height:10px;"></i> duplicate</span>' if is_dup else ""
             qtext = q.get("questionText") or ""
             ans_text = html.escape(q.get("expectedAnswerText") or "")
             hint_text = html.escape(q.get("hints") or "")
             rid = q.get("id")
+            saved_fmt = html.escape(fmt_date(q.get("createdAt")))
+            img_url = q.get("questionImageUrl")
 
-            # Answer cell: show text inline if present, else muted dash
+            # Image block
+            if img_url:
+                esc_url = html.escape(img_url)
+                img_block = f'<div class="card-img-wrap"><img src="{esc_url}" alt="figure" onclick="openModal(\'{esc_url}\')" title="Click to zoom"></div>'
+            else:
+                img_block = ""
+
+            # Answer + hint
             if has_ans:
-                ans_cell = f'<div class="ans-text">{ans_text}</div>'
+                ans_block = f'<div class="card-section"><span class="section-label">Answer</span><div class="card-ans">{ans_text}</div></div>'
             else:
-                ans_cell = '<span class="muted">—</span>'
-
-            # Hint cell
+                ans_block = ""
             if has_hint:
-                hint_cell = f'<div class="hint-text">{hint_text}</div>'
+                hint_block = f'<div class="card-section"><span class="section-label">Hint</span><div class="card-hint">{hint_text}</div></div>'
             else:
-                hint_cell = '<span class="muted">—</span>'
+                hint_block = ""
+
+            body_layout = "card-body-split" if img_url else "card-body-single"
 
             return (
-                f"<tr class='{row_cls}'"
-                f" data-id='{rid}'"
-                f" data-type='{html.escape(str(q.get('questionType') or '').lower())}'"
-                f" data-diff='{html.escape(str(q.get('difficulty') or '').lower())}'"
-                f" data-bloom='{html.escape(str(q.get('bloomLevel') or '').lower())}'"
-                f" data-status='{html.escape(str(q.get('status') or '').lower())}'"
-                f" data-answer='{'yes' if has_ans else 'no'}'"
-                f" data-dup='{'yes' if is_dup else 'no'}'"
-                f" data-text='{html.escape(qtext.lower()[:400])}'"
-                f">"
-                f"<td><span class='badge badge-gray'>{rid}</span>{dup_marker}</td>"
-                f"<td>{type_badge(q.get('questionType'))}</td>"
-                f"<td>{diff_badge(q.get('difficulty'))}</td>"
-                f"<td><span class='badge badge-gray'>{html.escape(str(q.get('bloomLevel', '') or ''))}</span></td>"
-                f"<td>{status_badge(q.get('status'))}</td>"
-                f"<td class='img-cell'>{img_tag(q)}</td>"
-                f"<td class='ans-cell'>{ans_cell}</td>"
-                f"<td class='hint-cell'>{hint_cell}</td>"
-                f"<td class='text-cell' title='{html.escape(qtext)}'>{html.escape(trunc(qtext))}</td>"
-                f"</tr>"
+                f'<div class="{card_cls}"'
+                f' data-id="{rid}"'
+                f' data-type="{html.escape(str(q.get("questionType") or "").lower())}"'
+                f' data-diff="{html.escape(str(q.get("difficulty") or "").lower())}"'
+                f' data-bloom="{html.escape(str(q.get("bloomLevel") or "").lower())}"'
+                f' data-status="{html.escape(str(q.get("status") or "").lower())}"'
+                f' data-answer="{"yes" if has_ans else "no"}"'
+                f' data-dup="{"yes" if is_dup else "no"}"'
+                f' data-text="{html.escape(qtext.lower()[:400])}"'
+                f'>'
+                # Top bar
+                f'<div class="card-topbar">'
+                f'  <span class="card-id badge badge-gray">#{rid}</span>'
+                f'  {type_badge(q.get("questionType"))}'
+                f'  {diff_badge(q.get("difficulty"))}'
+                f'  <span class="badge badge-gray">{html.escape(str(q.get("bloomLevel") or ""))}</span>'
+                f'  {status_badge(q.get("status"))}'
+                f'  {dup_marker}'
+                f'  <span class="card-ts"><i data-lucide="clock" style="width:11px;height:11px;"></i> {saved_fmt}</span>'
+                f'</div>'
+                # Body
+                f'<div class="{body_layout}">'
+                f'  <div class="card-text">{html.escape(qtext)}</div>'
+                f'  {img_block}'
+                f'</div>'
+                # Answer / hint
+                f'{ans_block}'
+                f'{hint_block}'
+                f'</div>'
             )
-        q_rows = "".join(_row(q) for q in qs)
+        q_cards = "".join(_card(q) for q in qs)
         has_dups = any(q.get("id") in dup_ids for q in qs)
         dup_warn = ' <span class="badge badge-red" style="font-size:0.65rem;">has duplicates</span>' if has_dups else ""
         batches_html_parts.append(f"""
@@ -1863,14 +1881,7 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
               {dup_warn}
             </div>
           </div>
-          <div class="tbl-wrap">
-            <table>
-              <thead><tr>
-                <th>ID</th><th>Type</th><th>Difficulty</th><th>Bloom</th><th>Status</th><th>Image</th><th>Answer</th><th>Hint</th><th>Question text</th>
-              </tr></thead>
-              <tbody>{q_rows}</tbody>
-            </table>
-          </div>
+          <div class="cards-grid">{q_cards}</div>
         </div>""")
     batches_html = "".join(batches_html_parts)
 
@@ -1984,37 +1995,51 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   .qtext {{ font-size: 0.875rem; line-height: 1.7; margin-bottom: 10px; overflow-x: auto; }}
   .meta-list {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }}
   .meta-list li {{ font-size: 0.75rem; color: #64748b; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; padding: 4px 8px; font-family: monospace; }}
-  /* Table */
-  .tbl-wrap {{ overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.8rem; }}
-  th {{ background: #f8fafc; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #64748b; padding: 8px 10px; text-align: left; position: sticky; top: 0; border-bottom: 1px solid #e2e8f0; }}
-  td {{ padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; color: #1e293b; }}
-  tr:last-child td {{ border-bottom: none; }}
-  tr:hover td {{ background: #f8fafc; }}
-  td.text-cell {{ max-width: 480px; font-size: 0.8rem; line-height: 1.6; overflow-x: auto; }}
+  /* Badges */
   .badge {{ padding: 2px 7px; border-radius: 9999px; font-size: 0.65rem; font-weight: 600; white-space: nowrap; }}
   .badge-blue {{ background: #dbeafe; color: #1d4ed8; }}
   .badge-green {{ background: #dcfce7; color: #166534; }}
   .badge-gray {{ background: #f1f5f9; color: #64748b; }}
   .badge-red {{ background: #fee2e2; color: #dc2626; }}
-  /* Image cell */
-  .img-cell img {{ max-width: 120px; max-height: 90px; border: 1px solid #e2e8f0; border-radius: 5px; display: block; cursor: zoom-in; object-fit: contain; }}
-  /* Answer / hint cells */
-  .ans-cell, .hint-cell {{ max-width: 260px; }}
-  .ans-text, .hint-text {{ font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap; overflow-x: auto; }}
-  .hint-text {{ color: #64748b; font-style: italic; }}
-  body.dark .hint-text {{ color: #475569; }}
   /* Batch groups */
-  .batch-block {{ margin-bottom: 16px; }}
-  .batch-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }}
+  .batch-block {{ margin-bottom: 24px; }}
+  .batch-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }}
   .batch-meta {{ display: flex; align-items: center; gap: 7px; font-size: 0.78rem; flex-wrap: wrap; }}
   .batch-time {{ font-weight: 600; color: #1e293b; }}
   .batch-sep {{ color: #cbd5e1; }}
-  .dup-row td {{ background: #fff7ed !important; }}
-  .dup-marker {{ color: #f59e0b; font-size: 0.75rem; margin-left: 4px; }}
   body.dark .batch-time {{ color: #e2e8f0; }}
   body.dark .batch-sep {{ color: #334155; }}
-  body.dark .dup-row td {{ background: #2d1f0a !important; }}
+  /* Cards grid */
+  .cards-grid {{ display: flex; flex-direction: column; gap: 12px; }}
+  /* Question card */
+  .q-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }}
+  .dup-card-q {{ border-left: 3px solid #f59e0b; }}
+  /* Top bar */
+  .card-topbar {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #f1f5f9; background: #f8fafc; }}
+  .card-id {{ font-family: monospace; }}
+  .card-ts {{ margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 0.7rem; color: #94a3b8; white-space: nowrap; }}
+  .dup-marker-badge {{ display: inline-flex; align-items: center; gap: 3px; font-size: 0.65rem; font-weight: 700; color: #d97706; background: #fef3c7; border: 1px solid #fde68a; border-radius: 9999px; padding: 1px 7px; }}
+  /* Card body layouts */
+  .card-body-split {{ display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 16px 14px; align-items: start; }}
+  .card-body-single {{ padding: 16px 14px; }}
+  .card-text {{ font-size: 0.9rem; line-height: 1.75; color: #1e293b; overflow-x: auto; }}
+  /* Image in card */
+  .card-img-wrap {{ flex-shrink: 0; }}
+  .card-img-wrap img {{ max-width: 220px; max-height: 180px; border: 1px solid #e2e8f0; border-radius: 7px; display: block; cursor: zoom-in; object-fit: contain; }}
+  /* Answer / Hint sections */
+  .card-section {{ padding: 10px 14px; border-top: 1px solid #f1f5f9; }}
+  .section-label {{ display: block; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #94a3b8; margin-bottom: 4px; }}
+  .card-ans {{ font-size: 0.82rem; line-height: 1.65; color: #1e293b; white-space: pre-wrap; overflow-x: auto; }}
+  .card-hint {{ font-size: 0.82rem; line-height: 1.65; color: #64748b; font-style: italic; white-space: pre-wrap; overflow-x: auto; }}
+  /* Dark mode cards */
+  body.dark .q-card {{ background: #1e293b; border-color: #334155; }}
+  body.dark .dup-card-q {{ border-left-color: #f59e0b; }}
+  body.dark .card-topbar {{ background: #0f172a; border-bottom-color: #334155; }}
+  body.dark .card-text {{ color: #e2e8f0; }}
+  body.dark .card-section {{ border-top-color: #334155; }}
+  body.dark .card-ans {{ color: #e2e8f0; }}
+  body.dark .card-hint {{ color: #475569; }}
+  body.dark .card-img-wrap img {{ border-color: #334155; }}
   /* Image modal */
   .img-modal {{ position: fixed; inset: 0; background: rgba(15,23,42,0.8); display: none; align-items: center; justify-content: center; z-index: 300; padding: 18px; }}
   .img-modal.open {{ display: flex; }}
@@ -2037,15 +2062,10 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   body.dark .dup-card {{ border-left-color: #f87171; }}
   body.dark .dup-count {{ color: #f87171; }}
   body.dark .meta-list li {{ background: #0f172a; border-color: #334155; color: #94a3b8; }}
-  body.dark .tbl-wrap {{ border-color: #334155; }}
-  body.dark th {{ background: #1e293b; border-color: #334155; color: #475569; }}
-  body.dark td {{ color: #e2e8f0; border-color: #1e293b; }}
-  body.dark tr:hover td {{ background: #1e293b; }}
   body.dark .badge-blue {{ background: #1e3a5f; color: #93c5fd; }}
   body.dark .badge-green {{ background: #14532d; color: #86efac; }}
-  body.dark .badge-gray {{ background: #1e293b; color: #64748b; }}
+  body.dark .badge-gray {{ background: #334155; color: #94a3b8; }}
   body.dark .badge-red {{ background: #450a0a; color: #f87171; }}
-  body.dark .img-cell img {{ border-color: #334155; }}
   body.dark .muted {{ color: #475569; }}
 </style>
 </head>
@@ -2193,30 +2213,30 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
 
   function applyFilters() {{
     var search = (document.getElementById('q-search').value || '').toLowerCase().trim();
-    var rows = document.querySelectorAll('tr.q-row');
+    var cards = document.querySelectorAll('.q-card');
     var visible = 0;
 
-    rows.forEach(function(row) {{
+    cards.forEach(function(card) {{
       // Search: match id or text
-      var idMatch   = !search || row.dataset.id.includes(search);
-      var textMatch = !search || row.dataset.text.includes(search);
-      if (!idMatch && !textMatch) {{ row.style.display = 'none'; return; }}
+      var idMatch   = !search || card.dataset.id.includes(search);
+      var textMatch = !search || card.dataset.text.includes(search);
+      if (!idMatch && !textMatch) {{ card.style.display = 'none'; return; }}
 
       // Chip filters — each group is OR within, AND across groups
       for (var group in activeChips) {{
         if (!activeChips[group].size) continue;
-        var field = row.dataset[group === 'bloom' ? 'bloom' : group];  // data-bloom etc
-        if (!activeChips[group].has(field)) {{ row.style.display = 'none'; return; }}
+        var field = card.dataset[group];
+        if (!activeChips[group].has(field)) {{ card.style.display = 'none'; return; }}
       }}
 
-      row.style.display = '';
+      card.style.display = '';
       visible++;
     }});
 
-    // Hide batch blocks that have no visible rows
+    // Hide batch blocks that have no visible cards
     document.querySelectorAll('.batch-block').forEach(function(block) {{
-      var anyVisible = Array.from(block.querySelectorAll('tr.q-row')).some(function(r) {{
-        return r.style.display !== 'none';
+      var anyVisible = Array.from(block.querySelectorAll('.q-card')).some(function(c) {{
+        return c.style.display !== 'none';
       }});
       block.style.display = anyVisible ? '' : 'none';
     }});
