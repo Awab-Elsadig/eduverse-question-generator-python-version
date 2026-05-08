@@ -1730,24 +1730,6 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     )
     questions = questions[:limit]
 
-    # Fetch the logged-in user's profile to resolve their name
-    known_users: dict[int, str] = {}
-    try:
-        async with httpx.AsyncClient() as _mc:
-            _mr = await _mc.get(
-                f"{EDUVERSE_API_URL}/api/auth/me",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            if _mr.status_code == 200:
-                _md = _mr.json()
-                _uid = int(_md.get("userId") or 0)
-                _name = f"{_md.get('firstName', '')} {_md.get('lastName', '')}".strip()
-                if _uid and _name:
-                    known_users[_uid] = _name
-    except Exception:
-        pass
-
     # Duplicate detection
     dup_groups: dict[str, list[dict]] = defaultdict(list)
     for q in questions:
@@ -1757,23 +1739,23 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     dups = {k: v for k, v in dup_groups.items() if len(v) > 1}
     dup_ids: set[int] = {q.get("id") for items in dups.values() for q in items}
 
-    # Group by save-minute (YYYY-MM-DD HH:MM) + createdBy
+    # Group by save-minute (YYYY-MM-DD HH:MM)
     def minute_key(q):
         raw = q.get("createdAt") or ""
         if not raw:
-            return ("~no-date", q.get("createdBy") or 0)
+            return "~no-date"
         try:
             iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
             d = _dt.fromisoformat(iso)
-            return (d.strftime("%Y-%m-%d %H:%M"), q.get("createdBy") or 0)
+            return d.strftime("%Y-%m-%d %H:%M")
         except Exception:
-            return ("~no-date", q.get("createdBy") or 0)
+            return "~no-date"
 
-    batches: dict[tuple, list[dict]] = defaultdict(list)
+    batches: dict[str, list[dict]] = defaultdict(list)
     for q in questions:
         batches[minute_key(q)].append(q)
     # Sort batches newest first
-    sorted_batches = sorted(batches.items(), key=lambda kv: kv[0][0], reverse=True)
+    sorted_batches = sorted(batches.items(), key=lambda kv: kv[0], reverse=True)
 
     def fmt_date(s):
         if not s:
@@ -1786,14 +1768,13 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
             return str(s)
 
     def fmt_minute(key):
-        ts, _ = key
-        if ts == "~no-date":
+        if key == "~no-date":
             return "Unknown time"
         try:
-            d = _dt.strptime(ts, "%Y-%m-%d %H:%M")
+            d = _dt.strptime(key, "%Y-%m-%d %H:%M")
             return d.strftime("%Y-%m-%d %I:%M %p") + " UTC"
         except Exception:
-            return ts
+            return key
 
     def trunc(s, n=240):
         s = s or ""
@@ -1820,17 +1801,9 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
         c = {"approved": "badge-green", "draft": "badge-gray", "rejected": "badge-red"}.get(v.lower(), "badge-gray")
         return f'<span class="badge {c}">{html.escape(v)}</span>' if v else '<span class="muted">—</span>'
 
-    def user_label(uid):
-        uid = int(uid) if uid else 0
-        name = known_users.get(uid)
-        if name:
-            return f'<span class="badge badge-blue">{html.escape(name)}</span>'
-        return f'<span class="badge badge-gray">User #{uid}</span>' if uid else '<span class="muted">—</span>'
-
     # Build batch HTML
     batches_html_parts = []
     for key, qs in sorted_batches:
-        _, by_id = key
         q_rows = "".join(
             f"<tr{'  class=\"dup-row\"' if q.get('id') in dup_ids else ''}>"
             f"<td><span class='badge badge-gray'>{q.get('id')}</span>{'<span class=\"dup-marker\" title=\"Duplicate\">⚠</span>' if q.get('id') in dup_ids else ''}</td>"
@@ -1852,9 +1825,6 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
             <div class="batch-meta">
               <i data-lucide="clock" style="width:13px;height:13px;flex-shrink:0;"></i>
               <span class="batch-time">{html.escape(fmt_minute(key))}</span>
-              <span class="batch-sep">&mdash;</span>
-              <i data-lucide="user" style="width:13px;height:13px;flex-shrink:0;"></i>
-              {user_label(by_id)}
               <span class="batch-sep">&mdash;</span>
               <span class="badge badge-gray">{len(qs)} question{'s' if len(qs) != 1 else ''}</span>
               {dup_warn}
