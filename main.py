@@ -1668,9 +1668,181 @@ def serve_output(filename: str):
 
 
 @app.get("/latest-questions", response_class=HTMLResponse)
-async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, limit: int = 100):
-    """Inspector page: latest questions saved to EduVerse for a given course/chapter,
-    with attached Supabase images and exact-text duplicate detection."""
+async def latest_questions_shell(courseId: int = 30, chapterId: Optional[int] = None, limit: int = 100):
+    """Shell page — loads instantly, then fetches content via AJAX."""
+    chapter_param = f"&chapterId={chapterId}" if chapterId is not None else ""
+    data_url = f"/latest-questions-data?courseId={courseId}{chapter_param}&limit={limit}"
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Latest Questions — course {courseId}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.5; }}
+  body.dark {{ background: #0f172a; color: #e2e8f0; }}
+  .container {{ max-width: 1200px; margin: 0 auto; padding: 28px 16px 60px; }}
+  h1 {{ font-size: 1.4rem; font-weight: 700; }}
+  .btn {{ padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; font-family: inherit; transition: background 0.12s; display: inline-flex; align-items: center; gap: 6px; }}
+  .btn-secondary {{ background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }}
+  .btn-secondary:hover {{ background: #e2e8f0; }}
+  .btn-sm {{ padding: 5px 12px; font-size: 0.78rem; }}
+  .dm-toggle {{ display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e2e8f0; background: #f1f5f9; color: #475569; cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s; flex-shrink: 0; }}
+  .dm-toggle:hover {{ background: #e2e8f0; color: #1e293b; }}
+  body.dark .btn-secondary {{ background: #1e293b; color: #94a3b8; border-color: #334155; }}
+  body.dark .btn-secondary:hover {{ background: #334155; color: #e2e8f0; }}
+  body.dark .dm-toggle {{ background: #1e293b; border-color: #334155; color: #94a3b8; }}
+  body.dark .dm-toggle:hover {{ background: #334155; color: #e2e8f0; }}
+
+  /* ── Loading scene ── */
+  #loading-scene {{
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 80px 20px 100px; gap: 28px;
+  }}
+  .loader-books {{
+    display: flex; gap: 10px; align-items: flex-end; height: 60px;
+  }}
+  .book {{
+    width: 18px; border-radius: 3px 3px 0 0;
+    animation: bookBounce 1.1s ease-in-out infinite;
+    transform-origin: bottom center;
+  }}
+  .book:nth-child(1) {{ height: 46px; background: #2563eb; animation-delay: 0s; }}
+  .book:nth-child(2) {{ height: 54px; background: #7c3aed; animation-delay: 0.15s; }}
+  .book:nth-child(3) {{ height: 38px; background: #059669; animation-delay: 0.30s; }}
+  .book:nth-child(4) {{ height: 58px; background: #d97706; animation-delay: 0.45s; }}
+  .book:nth-child(5) {{ height: 42px; background: #dc2626; animation-delay: 0.60s; }}
+  @keyframes bookBounce {{
+    0%, 100% {{ transform: scaleY(1); opacity: 1; }}
+    50% {{ transform: scaleY(0.55); opacity: 0.6; }}
+  }}
+  .loader-dots {{
+    display: flex; gap: 7px;
+  }}
+  .loader-dots span {{
+    width: 8px; height: 8px; border-radius: 50%; background: #94a3b8;
+    animation: dotPulse 1.4s ease-in-out infinite;
+  }}
+  .loader-dots span:nth-child(2) {{ animation-delay: 0.2s; }}
+  .loader-dots span:nth-child(3) {{ animation-delay: 0.4s; }}
+  @keyframes dotPulse {{
+    0%, 80%, 100% {{ transform: scale(0.7); opacity: 0.5; }}
+    40% {{ transform: scale(1); opacity: 1; background: #2563eb; }}
+  }}
+  .loader-msg {{
+    font-size: 0.9rem; color: #64748b; text-align: center; max-width: 300px; line-height: 1.6;
+  }}
+  .loader-msg strong {{ color: #1e293b; display: block; font-size: 1rem; margin-bottom: 4px; }}
+  body.dark .loader-msg {{ color: #475569; }}
+  body.dark .loader-msg strong {{ color: #e2e8f0; }}
+  #error-scene {{
+    display: none; text-align: center; padding: 60px 20px;
+    color: #dc2626; font-size: 0.9rem;
+  }}
+  body.dark #error-scene {{ color: #f87171; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:20px;">
+    <h1>Latest Saved Questions</h1>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <a href="/" class="btn btn-secondary btn-sm" style="text-decoration:none;">
+        <i data-lucide="arrow-left" style="width:13px;height:13px;"></i> Back
+      </a>
+      <button class="dm-toggle" onclick="toggleDark()" title="Toggle dark mode" aria-label="Toggle dark mode">
+        <svg id="dm-icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg id="dm-icon-sun"  width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Loading animation -->
+  <div id="loading-scene">
+    <div class="loader-books">
+      <div class="book"></div><div class="book"></div><div class="book"></div>
+      <div class="book"></div><div class="book"></div>
+    </div>
+    <div class="loader-dots">
+      <span></span><span></span><span></span>
+    </div>
+    <div class="loader-msg">
+      <strong>Fetching questions...</strong>
+      Pulling from the question bank and checking for duplicates.
+    </div>
+  </div>
+  <div id="error-scene"></div>
+
+  <!-- Content injected here -->
+  <div id="content"></div>
+</div>
+
+<script>
+  // Dark mode
+  function applyDark(dark) {{
+    document.body.classList.toggle('dark', dark);
+    document.getElementById('dm-icon-moon').style.display = dark ? 'none' : '';
+    document.getElementById('dm-icon-sun').style.display  = dark ? '' : 'none';
+  }}
+  function toggleDark() {{
+    var isDark = document.body.classList.contains('dark');
+    applyDark(!isDark);
+    try {{ localStorage.setItem('dm', !isDark ? '1' : '0'); }} catch(e) {{}}
+  }}
+  (function() {{
+    try {{
+      var saved = localStorage.getItem('dm');
+      applyDark(saved !== null ? saved === '1' : window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }} catch(e) {{}}
+  }})();
+
+  lucide.createIcons();
+
+  // Fetch data
+  fetch("{data_url}")
+    .then(function(r) {{
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }})
+    .then(function(fragHtml) {{
+      document.getElementById('loading-scene').style.display = 'none';
+      var el = document.getElementById('content');
+      // Use createContextualFragment so <script> tags execute
+      var frag = document.createRange().createContextualFragment(fragHtml);
+      el.appendChild(frag);
+      // Re-run lucide on injected icons
+      lucide.createIcons();
+      // KaTeX (may already be loaded; retry if deferred scripts aren't done yet)
+      function tryRenderMath() {{
+        if (window.renderMathInElement) {{
+          renderMathInElement(el, {{ delimiters: [
+            {{left: '$$', right: '$$', display: true}},
+            {{left: '$',  right: '$',  display: false}}
+          ]}});
+        }} else {{
+          setTimeout(tryRenderMath, 200);
+        }}
+      }}
+      tryRenderMath();
+    }})
+    .catch(function(err) {{
+      document.getElementById('loading-scene').style.display = 'none';
+      var es = document.getElementById('error-scene');
+      es.style.display = 'block';
+      es.innerHTML = '<strong style="font-size:1rem;display:block;margin-bottom:8px;">Failed to load questions</strong>' + err.message
+        + '<br><br><a href="" style="color:#2563eb;">Retry</a>';
+    }});
+</script>
+</body></html>"""
+
+
+@app.get("/latest-questions-data", response_class=HTMLResponse)
+async def latest_questions_data(courseId: int, chapterId: Optional[int] = None, limit: int = 100):
+    """Data fragment — fetched by the shell page via AJAX."""
     from collections import defaultdict
     from datetime import datetime as _dt, timezone as _tz
 
@@ -1928,46 +2100,18 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
             f'<span class="chip-sep"></span>'
         ) if values else ""
 
-    return f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Latest Questions — course {courseId}</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-  onload="renderMathInElement(document.body, {{ delimiters: [
-    {{left: '$$', right: '$$', display: true}},
-    {{left: '$',  right: '$',  display: false}}
-  ]}});"></script>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-<style>
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.5; }}
-  .container {{ max-width: 1200px; margin: 0 auto; padding: 28px 16px 60px; }}
-  h1 {{ font-size: 1.4rem; font-weight: 700; }}
+    return f"""<style>
   .subtitle {{ color: #64748b; margin: 3px 0 20px; font-size: 0.85rem; }}
   h2 {{ font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin: 24px 0 10px; }}
-  /* Buttons */
-  .btn {{ padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; font-family: inherit; transition: background 0.12s; display: inline-flex; align-items: center; gap: 6px; }}
-  .btn-primary {{ background: #2563eb; color: white; }}
+  .btn-primary {{ background: #2563eb; color: white; border: none; }}
   .btn-primary:hover {{ background: #1d4ed8; }}
-  .btn-secondary {{ background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }}
-  .btn-secondary:hover {{ background: #e2e8f0; }}
-  .btn-sm {{ padding: 5px 12px; font-size: 0.78rem; }}
-  /* Card */
   .card {{ background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; }}
-  /* Dark mode toggle */
-  .dm-toggle {{ display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; border: 1px solid #e2e8f0; background: #f1f5f9; color: #475569; cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s; flex-shrink: 0; }}
-  .dm-toggle:hover {{ background: #e2e8f0; color: #1e293b; }}
-  /* Filter card */
   .filter-row {{ display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }}
   .filter-row label {{ display: flex; flex-direction: column; gap: 3px; font-size: 0.72rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }}
   .filter-row input[type=number] {{ width: 100px; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; font-family: inherit; -moz-appearance: textfield; appearance: textfield; }}
   .filter-row input[type=number]::-webkit-outer-spin-button,
   .filter-row input[type=number]::-webkit-inner-spin-button {{ -webkit-appearance: none; margin: 0; }}
   .filter-row input:focus {{ outline: none; border-color: #2563eb; }}
-  /* Live search + filter chips */
   .search-bar {{ width: 100%; padding: 7px 11px 7px 34px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; font-family: inherit; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E") no-repeat 10px center; }}
   .search-bar:focus {{ outline: none; border-color: #2563eb; }}
   .chip-row {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; align-items: center; }}
@@ -1977,6 +2121,53 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   .chip.active {{ background: #2563eb; color: #fff; border-color: #2563eb; }}
   .chip-sep {{ width: 1px; height: 18px; background: #e2e8f0; margin: 0 2px; }}
   .filter-count {{ font-size: 0.72rem; color: #64748b; margin-left: auto; }}
+  .summary-strip {{ display: flex; flex-wrap: wrap; gap: 20px; }}
+  .summary-strip .stat {{ display: flex; flex-direction: column; }}
+  .summary-strip .stat-val {{ font-size: 1.5rem; font-weight: 700; line-height: 1.1; }}
+  .summary-strip .stat-lbl {{ font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }}
+  .dup-card {{ border-left: 3px solid #dc2626; }}
+  .dup-count {{ display: inline-flex; align-items: center; gap: 5px; font-size: 0.72rem; font-weight: 700; color: #dc2626; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }}
+  .qtext {{ font-size: 0.875rem; line-height: 1.7; margin-bottom: 10px; word-break: break-word; overflow-wrap: break-word; }}
+  .meta-list {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }}
+  .meta-list li {{ font-size: 0.75rem; color: #64748b; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; padding: 4px 8px; font-family: monospace; }}
+  .badge {{ padding: 2px 7px; border-radius: 9999px; font-size: 0.65rem; font-weight: 600; white-space: nowrap; }}
+  .badge-blue {{ background: #dbeafe; color: #1d4ed8; }}
+  .badge-green {{ background: #dcfce7; color: #166534; }}
+  .badge-gray {{ background: #f1f5f9; color: #64748b; }}
+  .badge-red {{ background: #fee2e2; color: #dc2626; }}
+  .batch-block {{ margin-bottom: 24px; }}
+  .batch-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }}
+  .batch-meta {{ display: flex; align-items: center; gap: 7px; font-size: 0.78rem; flex-wrap: wrap; }}
+  .batch-time {{ font-weight: 600; color: #1e293b; }}
+  .batch-sep {{ color: #cbd5e1; }}
+  .cards-grid {{ display: flex; flex-direction: column; gap: 12px; }}
+  .q-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }}
+  .dup-card-q {{ border-left: 3px solid #f59e0b; }}
+  .card-topbar {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #f1f5f9; background: #f8fafc; }}
+  .card-id {{ font-family: monospace; }}
+  .card-ts {{ margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 0.7rem; color: #94a3b8; white-space: nowrap; }}
+  .dup-marker-badge {{ display: inline-flex; align-items: center; gap: 3px; font-size: 0.65rem; font-weight: 700; color: #d97706; background: #fef3c7; border: 1px solid #fde68a; border-radius: 9999px; padding: 1px 7px; }}
+  .card-body-split {{ display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 16px 14px; align-items: start; }}
+  .card-body-single {{ padding: 16px 14px; }}
+  .card-text {{ font-size: 0.9rem; line-height: 1.75; color: #1e293b; word-break: break-word; overflow-wrap: break-word; }}
+  .card-img-wrap {{ flex-shrink: 0; }}
+  .card-img-wrap img {{ max-width: 220px; max-height: 180px; border: 1px solid #e2e8f0; border-radius: 7px; display: block; cursor: zoom-in; object-fit: contain; }}
+  .card-section {{ padding: 10px 14px; border-top: 1px solid #f1f5f9; }}
+  .section-label {{ display: block; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #94a3b8; margin-bottom: 4px; }}
+  .card-ans {{ font-size: 0.82rem; line-height: 1.65; color: #1e293b; white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word; }}
+  .card-hint {{ font-size: 0.82rem; line-height: 1.65; color: #64748b; font-style: italic; white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word; }}
+  .img-modal {{ position: fixed; inset: 0; background: rgba(15,23,42,0.8); display: none; align-items: center; justify-content: center; z-index: 300; padding: 18px; }}
+  .img-modal.open {{ display: flex; }}
+  .img-modal img {{ max-width: min(1100px,96vw); max-height: 90vh; border-radius: 8px; box-shadow: 0 16px 40px rgba(15,23,42,0.45); background: white; object-fit: contain; }}
+  .img-modal-close {{ position: absolute; top: 14px; right: 14px; border: 1px solid #94a3b8; background: #0f172a; color: white; border-radius: 6px; font-size: 0.78rem; padding: 6px 10px; cursor: pointer; }}
+  .muted {{ color: #94a3b8; font-size: 0.78rem; }}
+  /* Dark mode */
+  body.dark .card {{ background: #1e293b; border-color: #334155; }}
+  body.dark .subtitle {{ color: #64748b; }}
+  body.dark h2 {{ color: #475569; }}
+  body.dark .filter-row label {{ color: #64748b; }}
+  body.dark .filter-row input[type=number] {{ background: #0f172a; border-color: #334155; color: #e2e8f0; }}
+  body.dark .filter-row input:focus {{ border-color: #2563eb; }}
   body.dark .search-bar {{ background-color: #0f172a; border-color: #334155; color: #e2e8f0; }}
   body.dark .search-bar:focus {{ border-color: #2563eb; }}
   body.dark .chip {{ background: #1e293b; border-color: #334155; color: #94a3b8; }}
@@ -1984,80 +2175,6 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   body.dark .chip.active {{ background: #2563eb; color: #fff; border-color: #2563eb; }}
   body.dark .chip-sep {{ background: #334155; }}
   body.dark .filter-count {{ color: #475569; }}
-  /* Summary strip */
-  .summary-strip {{ display: flex; flex-wrap: wrap; gap: 20px; }}
-  .summary-strip .stat {{ display: flex; flex-direction: column; }}
-  .summary-strip .stat-val {{ font-size: 1.5rem; font-weight: 700; line-height: 1.1; }}
-  .summary-strip .stat-lbl {{ font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }}
-  /* Duplicate card */
-  .dup-card {{ border-left: 3px solid #dc2626; }}
-  .dup-count {{ display: inline-flex; align-items: center; gap: 5px; font-size: 0.72rem; font-weight: 700; color: #dc2626; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }}
-  .qtext {{ font-size: 0.875rem; line-height: 1.7; margin-bottom: 10px; overflow-x: auto; }}
-  .meta-list {{ list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }}
-  .meta-list li {{ font-size: 0.75rem; color: #64748b; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; padding: 4px 8px; font-family: monospace; }}
-  /* Badges */
-  .badge {{ padding: 2px 7px; border-radius: 9999px; font-size: 0.65rem; font-weight: 600; white-space: nowrap; }}
-  .badge-blue {{ background: #dbeafe; color: #1d4ed8; }}
-  .badge-green {{ background: #dcfce7; color: #166534; }}
-  .badge-gray {{ background: #f1f5f9; color: #64748b; }}
-  .badge-red {{ background: #fee2e2; color: #dc2626; }}
-  /* Batch groups */
-  .batch-block {{ margin-bottom: 24px; }}
-  .batch-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }}
-  .batch-meta {{ display: flex; align-items: center; gap: 7px; font-size: 0.78rem; flex-wrap: wrap; }}
-  .batch-time {{ font-weight: 600; color: #1e293b; }}
-  .batch-sep {{ color: #cbd5e1; }}
-  body.dark .batch-time {{ color: #e2e8f0; }}
-  body.dark .batch-sep {{ color: #334155; }}
-  /* Cards grid */
-  .cards-grid {{ display: flex; flex-direction: column; gap: 12px; }}
-  /* Question card */
-  .q-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }}
-  .dup-card-q {{ border-left: 3px solid #f59e0b; }}
-  /* Top bar */
-  .card-topbar {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #f1f5f9; background: #f8fafc; }}
-  .card-id {{ font-family: monospace; }}
-  .card-ts {{ margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 0.7rem; color: #94a3b8; white-space: nowrap; }}
-  .dup-marker-badge {{ display: inline-flex; align-items: center; gap: 3px; font-size: 0.65rem; font-weight: 700; color: #d97706; background: #fef3c7; border: 1px solid #fde68a; border-radius: 9999px; padding: 1px 7px; }}
-  /* Card body layouts */
-  .card-body-split {{ display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 16px 14px; align-items: start; }}
-  .card-body-single {{ padding: 16px 14px; }}
-  .card-text {{ font-size: 0.9rem; line-height: 1.75; color: #1e293b; overflow-x: auto; }}
-  /* Image in card */
-  .card-img-wrap {{ flex-shrink: 0; }}
-  .card-img-wrap img {{ max-width: 220px; max-height: 180px; border: 1px solid #e2e8f0; border-radius: 7px; display: block; cursor: zoom-in; object-fit: contain; }}
-  /* Answer / Hint sections */
-  .card-section {{ padding: 10px 14px; border-top: 1px solid #f1f5f9; }}
-  .section-label {{ display: block; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #94a3b8; margin-bottom: 4px; }}
-  .card-ans {{ font-size: 0.82rem; line-height: 1.65; color: #1e293b; white-space: pre-wrap; overflow-x: auto; }}
-  .card-hint {{ font-size: 0.82rem; line-height: 1.65; color: #64748b; font-style: italic; white-space: pre-wrap; overflow-x: auto; }}
-  /* Dark mode cards */
-  body.dark .q-card {{ background: #1e293b; border-color: #334155; }}
-  body.dark .dup-card-q {{ border-left-color: #f59e0b; }}
-  body.dark .card-topbar {{ background: #0f172a; border-bottom-color: #334155; }}
-  body.dark .card-text {{ color: #e2e8f0; }}
-  body.dark .card-section {{ border-top-color: #334155; }}
-  body.dark .card-ans {{ color: #e2e8f0; }}
-  body.dark .card-hint {{ color: #475569; }}
-  body.dark .card-img-wrap img {{ border-color: #334155; }}
-  /* Image modal */
-  .img-modal {{ position: fixed; inset: 0; background: rgba(15,23,42,0.8); display: none; align-items: center; justify-content: center; z-index: 300; padding: 18px; }}
-  .img-modal.open {{ display: flex; }}
-  .img-modal img {{ max-width: min(1100px,96vw); max-height: 90vh; border-radius: 8px; box-shadow: 0 16px 40px rgba(15,23,42,0.45); background: white; object-fit: contain; }}
-  .img-modal-close {{ position: absolute; top: 14px; right: 14px; border: 1px solid #94a3b8; background: #0f172a; color: white; border-radius: 6px; font-size: 0.78rem; padding: 6px 10px; cursor: pointer; }}
-  .muted {{ color: #94a3b8; font-size: 0.78rem; }}
-  /* Dark mode */
-  body.dark {{ background: #0f172a; color: #e2e8f0; }}
-  body.dark .card {{ background: #1e293b; border-color: #334155; }}
-  body.dark .btn-secondary {{ background: #1e293b; color: #94a3b8; border-color: #334155; }}
-  body.dark .btn-secondary:hover {{ background: #334155; color: #e2e8f0; }}
-  body.dark .dm-toggle {{ background: #1e293b; border-color: #334155; color: #94a3b8; }}
-  body.dark .dm-toggle:hover {{ background: #334155; color: #e2e8f0; }}
-  body.dark .subtitle {{ color: #64748b; }}
-  body.dark h2 {{ color: #475569; }}
-  body.dark .filter-row label {{ color: #64748b; }}
-  body.dark .filter-row input[type=number] {{ background: #0f172a; border-color: #334155; color: #e2e8f0; }}
-  body.dark .filter-row input:focus {{ border-color: #2563eb; }}
   body.dark .summary-strip .stat-lbl {{ color: #475569; }}
   body.dark .dup-card {{ border-left-color: #f87171; }}
   body.dark .dup-count {{ color: #f87171; }}
@@ -2067,130 +2184,107 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   body.dark .badge-gray {{ background: #334155; color: #94a3b8; }}
   body.dark .badge-red {{ background: #450a0a; color: #f87171; }}
   body.dark .muted {{ color: #475569; }}
+  body.dark .batch-time {{ color: #e2e8f0; }}
+  body.dark .batch-sep {{ color: #334155; }}
+  body.dark .q-card {{ background: #1e293b; border-color: #334155; }}
+  body.dark .dup-card-q {{ border-left-color: #f59e0b; }}
+  body.dark .card-topbar {{ background: #0f172a; border-bottom-color: #334155; }}
+  body.dark .card-text {{ color: #e2e8f0; }}
+  body.dark .card-section {{ border-top-color: #334155; }}
+  body.dark .card-ans {{ color: #e2e8f0; }}
+  body.dark .card-hint {{ color: #94a3b8; }}
+  body.dark .card-img-wrap img {{ border-color: #334155; }}
 </style>
-</head>
-<body>
-<div class="container">
 
-  <!-- Header -->
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:3px;">
-    <h1>Latest Saved Questions</h1>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <a href="/" class="btn btn-secondary btn-sm" style="text-decoration:none;">
-        <i data-lucide="arrow-left" style="width:13px;height:13px;"></i>
-        Back
-      </a>
-      <button class="dm-toggle" id="dm-toggle-btn" onclick="toggleDark()" title="Toggle dark mode" aria-label="Toggle dark mode">
-        <svg id="dm-icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-        <svg id="dm-icon-sun"  width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+<p class="subtitle">Course {courseId} &mdash; {chapter_label} &mdash; {len(questions)} of {total} questions &mdash; generated {generated}</p>
+
+<!-- Filter card -->
+<div class="card" style="margin-bottom:16px;">
+  <form method="get" action="/latest-questions">
+    <div class="filter-row">
+      <label>Course ID
+        <input type="number" name="courseId" value="{courseId}" required>
+      </label>
+      <label>Chapter ID (optional)
+        <input type="number" name="chapterId" value="{chapterId if chapterId is not None else ''}">
+      </label>
+      <label>Limit
+        <input type="number" name="limit" value="{limit}" min="1" max="500">
+      </label>
+      <button type="submit" class="btn btn-primary btn-sm" style="margin-bottom:1px;">
+        <i data-lucide="refresh-cw" style="width:13px;height:13px;"></i>
+        Refresh
       </button>
     </div>
-  </div>
-  <p class="subtitle">Course {courseId} &mdash; {chapter_label} &mdash; latest {len(questions)} of {total} questions &mdash; generated {generated}</p>
-
-  <!-- Filter card -->
-  <div class="card" style="margin-bottom:16px;">
-    <form method="get" action="/latest-questions">
-      <div class="filter-row">
-        <label>Course ID
-          <input type="number" name="courseId" value="{courseId}" required>
-        </label>
-        <label>Chapter ID (optional)
-          <input type="number" name="chapterId" value="{chapterId if chapterId is not None else ''}">
-        </label>
-        <label>Limit
-          <input type="number" name="limit" value="{limit}" min="1" max="500">
-        </label>
-        <button type="submit" class="btn btn-primary btn-sm" style="margin-bottom:1px;">
-          <i data-lucide="refresh-cw" style="width:13px;height:13px;"></i>
-          Refresh
-        </button>
-      </div>
-    </form>
-  </div>
-
-  <!-- Summary -->
-  <div class="card" style="margin-bottom:16px;">
-    <div class="summary-strip">
-      <div class="stat"><span class="stat-val">{len(questions)}</span><span class="stat-lbl">Showing</span></div>
-      <div class="stat"><span class="stat-val">{total}</span><span class="stat-lbl">Total</span></div>
-      <div class="stat"><span class="stat-val">{len(dups)}</span><span class="stat-lbl">Dup groups</span></div>
-      <div class="stat"><span class="stat-val">{sum(len(v) for v in dups.values())}</span><span class="stat-lbl">Dup rows</span></div>
-    </div>
-  </div>
-
-  {empty}
-
-  <!-- Live search + filter chips -->
-  <div class="card" style="margin-bottom:16px;">
-    <input class="search-bar" id="q-search" type="text" placeholder="Search by ID or question text…" oninput="applyFilters()">
-    <div class="chip-row" id="chip-area">
-      {chip_row("type", types_vals, "Type")}
-      {chip_row("difficulty", diff_vals, "Difficulty")}
-      {chip_row("bloom", bloom_vals, "Bloom")}
-      {chip_row("status", status_vals, "Status")}
-      <span class="chip" data-group="answer" data-val="yes" onclick="toggleChip(this)">Has answer</span>
-      <span class="chip" data-group="answer" data-val="no" onclick="toggleChip(this)">No answer</span>
-      <span class="chip-sep"></span>
-      <span class="chip" data-group="dup" data-val="yes" onclick="toggleChip(this)">Duplicates only</span>
-      <span class="filter-count" id="filter-count"></span>
-    </div>
-  </div>
-
-  <!-- Duplicates -->
-  <h2><i data-lucide="copy" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Duplicates (exact text)</h2>
-  {dup_html}
-
-  <!-- Batch groups -->
-  <h2><i data-lucide="layers" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Save batches (grouped by minute)</h2>
-  {batches_html}
-
+  </form>
 </div>
 
-<!-- Image zoom modal -->
-<div class="img-modal" id="img-modal" onclick="closeModal()">
-  <button class="img-modal-close" onclick="closeModal()">Close</button>
-  <img id="img-modal-src" src="" alt="figure">
+<!-- Summary -->
+<div class="card" style="margin-bottom:16px;">
+  <div class="summary-strip">
+    <div class="stat"><span class="stat-val">{len(questions)}</span><span class="stat-lbl">Showing</span></div>
+    <div class="stat"><span class="stat-val">{total}</span><span class="stat-lbl">Total</span></div>
+    <div class="stat"><span class="stat-val">{len(dups)}</span><span class="stat-lbl">Dup groups</span></div>
+    <div class="stat"><span class="stat-val">{sum(len(v) for v in dups.values())}</span><span class="stat-lbl">Dup rows</span></div>
+  </div>
 </div>
+
+{empty}
+
+<!-- Live search + filter chips -->
+<div class="card" style="margin-bottom:16px;">
+  <input class="search-bar" id="q-search" type="text" placeholder="Search by ID or question text…" oninput="applyFilters()">
+  <div class="chip-row" id="chip-area">
+    {chip_row("type", types_vals, "Type")}
+    {chip_row("difficulty", diff_vals, "Difficulty")}
+    {chip_row("bloom", bloom_vals, "Bloom")}
+    {chip_row("status", status_vals, "Status")}
+    <span class="chip" data-group="answer" data-val="yes" onclick="toggleChip(this)">Has answer</span>
+    <span class="chip" data-group="answer" data-val="no" onclick="toggleChip(this)">No answer</span>
+    <span class="chip-sep"></span>
+    <span class="chip" data-group="dup" data-val="yes" onclick="toggleChip(this)">Duplicates only</span>
+    <span class="filter-count" id="filter-count"></span>
+  </div>
+</div>
+
+<!-- Duplicates -->
+<h2><i data-lucide="copy" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Duplicates (exact text)</h2>
+{dup_html}
+
+<!-- Batch groups -->
+<h2><i data-lucide="layers" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Save batches (grouped by minute)</h2>
+{batches_html}
+
+<!-- Image zoom modal (appended to body by script below) -->
+<template id="modal-tpl">
+  <div class="img-modal" id="img-modal" onclick="closeModal()">
+    <button class="img-modal-close" onclick="closeModal()">Close</button>
+    <img id="img-modal-src" src="" alt="figure">
+  </div>
+</template>
 
 <script>
-  // Dark mode — reads same localStorage key as main page
-  function applyDark(dark) {{
-    document.body.classList.toggle('dark', dark);
-    document.getElementById('dm-icon-moon').style.display = dark ? 'none' : '';
-    document.getElementById('dm-icon-sun').style.display  = dark ? '' : 'none';
-  }}
-  function toggleDark() {{
-    var isDark = document.body.classList.contains('dark');
-    applyDark(!isDark);
-    try {{ localStorage.setItem('dm', !isDark ? '1' : '0'); }} catch(e) {{}}
-  }}
+  // Mount modal onto body
   (function() {{
-    try {{
-      var saved = localStorage.getItem('dm');
-      var prefersDark = saved !== null ? saved === '1' : window.matchMedia('(prefers-color-scheme: dark)').matches;
-      applyDark(prefersDark);
-    }} catch(e) {{}}
+    var tpl = document.getElementById('modal-tpl');
+    if (tpl) document.body.appendChild(tpl.content.cloneNode(true));
   }})();
 
-  // Image zoom
-  function openModal(src) {{
+  // Image zoom (global so inline onclick works)
+  window.openModal = function(src) {{
     document.getElementById('img-modal-src').src = src;
     document.getElementById('img-modal').classList.add('open');
-  }}
-  function closeModal() {{
+  }};
+  window.closeModal = function() {{
     document.getElementById('img-modal').classList.remove('open');
     document.getElementById('img-modal-src').src = '';
-  }}
-  document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') closeModal(); }});
-
-  // Lucide icons
-  lucide.createIcons();
+  }};
+  document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') window.closeModal(); }});
 
   // Live search + filter chips
-  var activeChips = {{}};  // group -> Set of active values
+  var activeChips = {{}};
 
-  function toggleChip(el) {{
+  window.toggleChip = function(el) {{
     var group = el.dataset.group;
     var val   = el.dataset.val;
     if (!activeChips[group]) activeChips[group] = new Set();
@@ -2198,7 +2292,6 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
       activeChips[group].delete(val);
       el.classList.remove('active');
     }} else {{
-      // For answer + dup groups only allow one active at a time
       if (group === 'answer' || group === 'dup') {{
         document.querySelectorAll('.chip[data-group="' + group + '"]').forEach(function(c) {{
           c.classList.remove('active');
@@ -2208,45 +2301,35 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
       activeChips[group].add(val);
       el.classList.add('active');
     }}
-    applyFilters();
-  }}
+    window.applyFilters();
+  }};
 
-  function applyFilters() {{
+  window.applyFilters = function() {{
     var search = (document.getElementById('q-search').value || '').toLowerCase().trim();
     var cards = document.querySelectorAll('.q-card');
     var visible = 0;
-
     cards.forEach(function(card) {{
-      // Search: match id or text
       var idMatch   = !search || card.dataset.id.includes(search);
       var textMatch = !search || card.dataset.text.includes(search);
       if (!idMatch && !textMatch) {{ card.style.display = 'none'; return; }}
-
-      // Chip filters — each group is OR within, AND across groups
       for (var group in activeChips) {{
         if (!activeChips[group].size) continue;
-        var field = card.dataset[group];
-        if (!activeChips[group].has(field)) {{ card.style.display = 'none'; return; }}
+        if (!activeChips[group].has(card.dataset[group])) {{ card.style.display = 'none'; return; }}
       }}
-
       card.style.display = '';
       visible++;
     }});
-
-    // Hide batch blocks that have no visible cards
     document.querySelectorAll('.batch-block').forEach(function(block) {{
       var anyVisible = Array.from(block.querySelectorAll('.q-card')).some(function(c) {{
         return c.style.display !== 'none';
       }});
       block.style.display = anyVisible ? '' : 'none';
     }});
-
     var fc = document.getElementById('filter-count');
     if (fc) fc.textContent = (search || Object.values(activeChips).some(function(s){{return s.size;}}))
       ? visible + ' match' + (visible !== 1 ? 'es' : '') : '';
-  }}
-</script>
-</body></html>"""
+  }};
+</script>"""
 
 
 if __name__ == "__main__":
