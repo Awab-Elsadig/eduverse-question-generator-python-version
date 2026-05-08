@@ -1804,19 +1804,35 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     # Build batch HTML
     batches_html_parts = []
     for key, qs in sorted_batches:
-        q_rows = "".join(
-            f"<tr{'  class=\"dup-row\"' if q.get('id') in dup_ids else ''}>"
-            f"<td><span class='badge badge-gray'>{q.get('id')}</span>{'<span class=\"dup-marker\" title=\"Duplicate\">⚠</span>' if q.get('id') in dup_ids else ''}</td>"
-            f"<td>{type_badge(q.get('questionType'))}</td>"
-            f"<td>{diff_badge(q.get('difficulty'))}</td>"
-            f"<td><span class='badge badge-gray'>{html.escape(str(q.get('bloomLevel','') or ''))}</span></td>"
-            f"<td>{status_badge(q.get('status'))}</td>"
-            f"<td class='img-cell'>{img_tag(q)}</td>"
-            f"<td>{'<span class=\"badge badge-green\">yes</span>' if (q.get('expectedAnswerText') or '').strip() else '<span class=\"badge badge-gray\">no</span>'}</td>"
-            f"<td class='text-cell' title=\"{html.escape(q.get('questionText') or '')}\">{html.escape(trunc(q.get('questionText') or ''))}</td>"
-            f"</tr>"
-            for q in qs
-        )
+        def _row(q):
+            is_dup = q.get("id") in dup_ids
+            has_ans = bool((q.get("expectedAnswerText") or "").strip())
+            row_cls = "q-row dup-row" if is_dup else "q-row"
+            dup_marker = '<span class="dup-marker" title="Duplicate">⚠</span>' if is_dup else ""
+            ans_badge = '<span class="badge badge-green">yes</span>' if has_ans else '<span class="badge badge-gray">no</span>'
+            qtext = q.get("questionText") or ""
+            return (
+                f"<tr class='{row_cls}'"
+                f" data-id='{q.get('id')}'"
+                f" data-type='{html.escape(str(q.get('questionType') or '').lower())}'"
+                f" data-diff='{html.escape(str(q.get('difficulty') or '').lower())}'"
+                f" data-bloom='{html.escape(str(q.get('bloomLevel') or '').lower())}'"
+                f" data-status='{html.escape(str(q.get('status') or '').lower())}'"
+                f" data-answer='{'yes' if has_ans else 'no'}'"
+                f" data-dup='{'yes' if is_dup else 'no'}'"
+                f" data-text='{html.escape(qtext.lower()[:400])}'"
+                f">"
+                f"<td><span class='badge badge-gray'>{q.get('id')}</span>{dup_marker}</td>"
+                f"<td>{type_badge(q.get('questionType'))}</td>"
+                f"<td>{diff_badge(q.get('difficulty'))}</td>"
+                f"<td><span class='badge badge-gray'>{html.escape(str(q.get('bloomLevel', '') or ''))}</span></td>"
+                f"<td>{status_badge(q.get('status'))}</td>"
+                f"<td class='img-cell'>{img_tag(q)}</td>"
+                f"<td>{ans_badge}</td>"
+                f"<td class='text-cell' title='{html.escape(qtext)}'>{html.escape(trunc(qtext))}</td>"
+                f"</tr>"
+            )
+        q_rows = "".join(_row(q) for q in qs)
         has_dups = any(q.get("id") in dup_ids for q in qs)
         dup_warn = ' <span class="badge badge-red" style="font-size:0.65rem;">has duplicates</span>' if has_dups else ""
         batches_html_parts.append(f"""
@@ -1865,6 +1881,25 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
     empty = "" if questions else f'<p class="muted">No questions found for course {courseId} ({chapter_label}).</p>'
     generated = _dt.now(_tz.utc).strftime("%Y-%m-%d %I:%M %p UTC")
 
+    # Distinct values for filter chips
+    def _vals(key):
+        return sorted({str(q.get(key) or "").strip() for q in questions if (q.get(key) or "").strip()})
+    types_vals = _vals("questionType")
+    diff_vals  = _vals("difficulty")
+    bloom_vals = _vals("bloomLevel")
+    status_vals = _vals("status")
+
+    def chip_row(group_id, values, label):
+        chips = "".join(
+            f'<span class="chip" data-group="{html.escape(group_id)}" data-val="{html.escape(v)}" onclick="toggleChip(this)">{html.escape(v)}</span>'
+            for v in values
+        )
+        return (
+            f'<span class="chip-label">{html.escape(label)}</span>'
+            f'{chips}'
+            f'<span class="chip-sep"></span>'
+        ) if values else ""
+
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -1904,6 +1939,23 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   .filter-row input[type=number]::-webkit-outer-spin-button,
   .filter-row input[type=number]::-webkit-inner-spin-button {{ -webkit-appearance: none; margin: 0; }}
   .filter-row input:focus {{ outline: none; border-color: #2563eb; }}
+  /* Live search + filter chips */
+  .search-bar {{ width: 100%; padding: 7px 11px 7px 34px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; font-family: inherit; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E") no-repeat 10px center; }}
+  .search-bar:focus {{ outline: none; border-color: #2563eb; }}
+  .chip-row {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; align-items: center; }}
+  .chip-label {{ font-size: 0.68rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 2px; }}
+  .chip {{ padding: 3px 10px; border-radius: 9999px; font-size: 0.72rem; font-weight: 600; cursor: pointer; border: 1px solid #e2e8f0; background: #f8fafc; color: #475569; transition: background 0.1s, color 0.1s, border-color 0.1s; user-select: none; }}
+  .chip:hover {{ background: #e2e8f0; }}
+  .chip.active {{ background: #2563eb; color: #fff; border-color: #2563eb; }}
+  .chip-sep {{ width: 1px; height: 18px; background: #e2e8f0; margin: 0 2px; }}
+  .filter-count {{ font-size: 0.72rem; color: #64748b; margin-left: auto; }}
+  body.dark .search-bar {{ background-color: #0f172a; border-color: #334155; color: #e2e8f0; }}
+  body.dark .search-bar:focus {{ border-color: #2563eb; }}
+  body.dark .chip {{ background: #1e293b; border-color: #334155; color: #94a3b8; }}
+  body.dark .chip:hover {{ background: #334155; color: #e2e8f0; }}
+  body.dark .chip.active {{ background: #2563eb; color: #fff; border-color: #2563eb; }}
+  body.dark .chip-sep {{ background: #334155; }}
+  body.dark .filter-count {{ color: #475569; }}
   /* Summary strip */
   .summary-strip {{ display: flex; flex-wrap: wrap; gap: 20px; }}
   .summary-strip .stat {{ display: flex; flex-direction: column; }}
@@ -2027,6 +2079,22 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
 
   {empty}
 
+  <!-- Live search + filter chips -->
+  <div class="card" style="margin-bottom:16px;">
+    <input class="search-bar" id="q-search" type="text" placeholder="Search by ID or question text…" oninput="applyFilters()">
+    <div class="chip-row" id="chip-area">
+      {chip_row("type", types_vals, "Type")}
+      {chip_row("difficulty", diff_vals, "Difficulty")}
+      {chip_row("bloom", bloom_vals, "Bloom")}
+      {chip_row("status", status_vals, "Status")}
+      <span class="chip" data-group="answer" data-val="yes" onclick="toggleChip(this)">Has answer</span>
+      <span class="chip" data-group="answer" data-val="no" onclick="toggleChip(this)">No answer</span>
+      <span class="chip-sep"></span>
+      <span class="chip" data-group="dup" data-val="yes" onclick="toggleChip(this)">Duplicates only</span>
+      <span class="filter-count" id="filter-count"></span>
+    </div>
+  </div>
+
   <!-- Duplicates -->
   <h2><i data-lucide="copy" style="width:12px;height:12px;display:inline;vertical-align:middle;margin-right:4px;"></i>Duplicates (exact text)</h2>
   {dup_html}
@@ -2076,6 +2144,65 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
 
   // Lucide icons
   lucide.createIcons();
+
+  // Live search + filter chips
+  var activeChips = {{}};  // group -> Set of active values
+
+  function toggleChip(el) {{
+    var group = el.dataset.group;
+    var val   = el.dataset.val;
+    if (!activeChips[group]) activeChips[group] = new Set();
+    if (activeChips[group].has(val)) {{
+      activeChips[group].delete(val);
+      el.classList.remove('active');
+    }} else {{
+      // For answer + dup groups only allow one active at a time
+      if (group === 'answer' || group === 'dup') {{
+        document.querySelectorAll('.chip[data-group="' + group + '"]').forEach(function(c) {{
+          c.classList.remove('active');
+        }});
+        activeChips[group] = new Set();
+      }}
+      activeChips[group].add(val);
+      el.classList.add('active');
+    }}
+    applyFilters();
+  }}
+
+  function applyFilters() {{
+    var search = (document.getElementById('q-search').value || '').toLowerCase().trim();
+    var rows = document.querySelectorAll('tr.q-row');
+    var visible = 0;
+
+    rows.forEach(function(row) {{
+      // Search: match id or text
+      var idMatch   = !search || row.dataset.id.includes(search);
+      var textMatch = !search || row.dataset.text.includes(search);
+      if (!idMatch && !textMatch) {{ row.style.display = 'none'; return; }}
+
+      // Chip filters — each group is OR within, AND across groups
+      for (var group in activeChips) {{
+        if (!activeChips[group].size) continue;
+        var field = row.dataset[group === 'bloom' ? 'bloom' : group];  // data-bloom etc
+        if (!activeChips[group].has(field)) {{ row.style.display = 'none'; return; }}
+      }}
+
+      row.style.display = '';
+      visible++;
+    }});
+
+    // Hide batch blocks that have no visible rows
+    document.querySelectorAll('.batch-block').forEach(function(block) {{
+      var anyVisible = Array.from(block.querySelectorAll('tr.q-row')).some(function(r) {{
+        return r.style.display !== 'none';
+      }});
+      block.style.display = anyVisible ? '' : 'none';
+    }});
+
+    var fc = document.getElementById('filter-count');
+    if (fc) fc.textContent = (search || Object.values(activeChips).some(function(s){{return s.size;}}))
+      ? visible + ' match' + (visible !== 1 ? 'es' : '') : '';
+  }}
 </script>
 </body></html>"""
 
