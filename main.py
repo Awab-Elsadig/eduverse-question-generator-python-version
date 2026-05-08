@@ -1807,13 +1807,29 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
         def _row(q):
             is_dup = q.get("id") in dup_ids
             has_ans = bool((q.get("expectedAnswerText") or "").strip())
+            has_hint = bool((q.get("hints") or "").strip())
             row_cls = "q-row dup-row" if is_dup else "q-row"
             dup_marker = '<span class="dup-marker" title="Duplicate">⚠</span>' if is_dup else ""
-            ans_badge = '<span class="badge badge-green">yes</span>' if has_ans else '<span class="badge badge-gray">no</span>'
             qtext = q.get("questionText") or ""
+            ans_text = html.escape(q.get("expectedAnswerText") or "")
+            hint_text = html.escape(q.get("hints") or "")
+            rid = q.get("id")
+
+            # Answer cell: show text inline if present, else muted dash
+            if has_ans:
+                ans_cell = f'<div class="ans-text">{ans_text}</div>'
+            else:
+                ans_cell = '<span class="muted">—</span>'
+
+            # Hint cell
+            if has_hint:
+                hint_cell = f'<div class="hint-text">{hint_text}</div>'
+            else:
+                hint_cell = '<span class="muted">—</span>'
+
             return (
                 f"<tr class='{row_cls}'"
-                f" data-id='{q.get('id')}'"
+                f" data-id='{rid}'"
                 f" data-type='{html.escape(str(q.get('questionType') or '').lower())}'"
                 f" data-diff='{html.escape(str(q.get('difficulty') or '').lower())}'"
                 f" data-bloom='{html.escape(str(q.get('bloomLevel') or '').lower())}'"
@@ -1822,13 +1838,14 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
                 f" data-dup='{'yes' if is_dup else 'no'}'"
                 f" data-text='{html.escape(qtext.lower()[:400])}'"
                 f">"
-                f"<td><span class='badge badge-gray'>{q.get('id')}</span>{dup_marker}</td>"
+                f"<td><span class='badge badge-gray'>{rid}</span>{dup_marker}</td>"
                 f"<td>{type_badge(q.get('questionType'))}</td>"
                 f"<td>{diff_badge(q.get('difficulty'))}</td>"
                 f"<td><span class='badge badge-gray'>{html.escape(str(q.get('bloomLevel', '') or ''))}</span></td>"
                 f"<td>{status_badge(q.get('status'))}</td>"
                 f"<td class='img-cell'>{img_tag(q)}</td>"
-                f"<td>{ans_badge}</td>"
+                f"<td class='ans-cell'>{ans_cell}</td>"
+                f"<td class='hint-cell'>{hint_cell}</td>"
                 f"<td class='text-cell' title='{html.escape(qtext)}'>{html.escape(trunc(qtext))}</td>"
                 f"</tr>"
             )
@@ -1849,7 +1866,7 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
           <div class="tbl-wrap">
             <table>
               <thead><tr>
-                <th>ID</th><th>Type</th><th>Difficulty</th><th>Bloom</th><th>Status</th><th>Image</th><th>Answer</th><th>Question text</th>
+                <th>ID</th><th>Type</th><th>Difficulty</th><th>Bloom</th><th>Status</th><th>Image</th><th>Answer</th><th>Hint</th><th>Question text</th>
               </tr></thead>
               <tbody>{q_rows}</tbody>
             </table>
@@ -1982,6 +1999,11 @@ async def latest_questions_page(courseId: int, chapterId: Optional[int] = None, 
   .badge-red {{ background: #fee2e2; color: #dc2626; }}
   /* Image cell */
   .img-cell img {{ max-width: 120px; max-height: 90px; border: 1px solid #e2e8f0; border-radius: 5px; display: block; cursor: zoom-in; object-fit: contain; }}
+  /* Answer / hint cells */
+  .ans-cell, .hint-cell {{ max-width: 260px; }}
+  .ans-text, .hint-text {{ font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap; overflow-x: auto; }}
+  .hint-text {{ color: #64748b; font-style: italic; }}
+  body.dark .hint-text {{ color: #475569; }}
   /* Batch groups */
   .batch-block {{ margin-bottom: 16px; }}
   .batch-header {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }}
